@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Bluetti Cloud Login",
+        "description": "Enter your Bluetti account credentials (same as the Bluetti mobile app).",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      },
+      "devices": {
+        "title": "Select Devices",
+        "description": "Choose which devices to add to Home Assistant.",
+        "data": {
+          "devices": "Devices"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Cannot connect to Bluetti Cloud. Please try again later.",
+      "no_devices": "No devices found in your Bluetti account.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  }
+}
