@@ -14,6 +14,23 @@ from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
+def _safe_int(value: Any) -> int | None:
+    """Convert a value to int, handling strings and None."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_on(value: Any) -> bool:
+    """Convert a switch value to bool, handling strings like '0'/'1'."""
+    if value is None:
+        return False
+    return str(value) not in ("0", "", "false", "False", "None")
+
+
 class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Coordinator that polls the Bluetti Cloud API for device data.
 
@@ -23,15 +40,14 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "online": bool,
                 "device_name": str,
                 "device_type": str,
-                "battery_soc": int,
-                "total_battery_percent": int,
-                "power_pv_in": int,
-                "power_grid_in": int,
-                "power_ac_out": int,
-                "power_dc_out": int,
+                "battery_soc": int | None,
+                "total_battery_percent": int | None,
+                "power_pv_in": int | None,
+                "power_grid_in": int | None,
+                "power_ac_out": int | None,
+                "power_dc_out": int | None,
                 "ac_switch": bool,
                 "dc_switch": bool,
-                ...
             }
         }
     """
@@ -67,24 +83,28 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             raise UpdateFailed(f"Error fetching device list: {err}") from err
 
         # Build a lookup from the device list
+        # API uses: sn, name, model, sessionState, lastAlive (with string values)
         device_lookup: dict[str, dict[str, Any]] = {}
         for dev in all_devices:
-            sn = dev.get("deviceSn", "")
+            sn = dev.get("sn", "")
             if sn in self._device_sns:
                 last_alive = dev.get("lastAlive") or {}
                 info = self._device_info.get(sn, {})
+                session_state = dev.get("sessionState", "")
+                is_online = session_state.lower() == "online" if session_state else False
+
                 device_lookup[sn] = {
-                    "online": bool(dev.get("online")),
-                    "device_name": info.get("name", dev.get("deviceName", sn)),
-                    "device_type": info.get("model", dev.get("productName", "")),
-                    "battery_soc": last_alive.get("batterySoc"),
-                    "total_battery_percent": last_alive.get("totalBatteryPercent"),
-                    "power_pv_in": last_alive.get("powerPvIn"),
-                    "power_grid_in": last_alive.get("powerGridIn"),
-                    "power_ac_out": last_alive.get("powerAcOut"),
-                    "power_dc_out": last_alive.get("powerDcOut"),
-                    "ac_switch": bool(last_alive.get("acSwitch")),
-                    "dc_switch": bool(last_alive.get("dcSwitch")),
+                    "online": is_online,
+                    "device_name": info.get("name", dev.get("name", sn)),
+                    "device_type": info.get("model", dev.get("model", "")),
+                    "battery_soc": _safe_int(last_alive.get("batterySoc") or dev.get("batSOC")),
+                    "total_battery_percent": _safe_int(last_alive.get("batterySoc") or dev.get("batSOC")),
+                    "power_pv_in": _safe_int(last_alive.get("powerPvIn") or dev.get("powerPvIn")),
+                    "power_grid_in": _safe_int(last_alive.get("powerGridIn") or dev.get("powerGridIn")),
+                    "power_ac_out": _safe_int(last_alive.get("powerAcOut") or dev.get("powerAcOut")),
+                    "power_dc_out": _safe_int(last_alive.get("powerDcOut") or dev.get("powerDcOut")),
+                    "ac_switch": _is_on(last_alive.get("acSwitch")),
+                    "dc_switch": _is_on(last_alive.get("dcSwitch")),
                 }
 
         # Fetch detailed telemetry for online devices
@@ -94,14 +114,14 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     alive_data = await self._client.get_device_last_alive(sn)
                     if alive_data:
                         device_lookup[sn].update({
-                            "battery_soc": alive_data.get("batterySoc", device_lookup[sn]["battery_soc"]),
-                            "total_battery_percent": alive_data.get("totalBatteryPercent", device_lookup[sn]["total_battery_percent"]),
-                            "power_pv_in": alive_data.get("powerPvIn", device_lookup[sn]["power_pv_in"]),
-                            "power_grid_in": alive_data.get("powerGridIn", device_lookup[sn]["power_grid_in"]),
-                            "power_ac_out": alive_data.get("powerAcOut", device_lookup[sn]["power_ac_out"]),
-                            "power_dc_out": alive_data.get("powerDcOut", device_lookup[sn]["power_dc_out"]),
-                            "ac_switch": bool(alive_data.get("acSwitch", device_lookup[sn]["ac_switch"])),
-                            "dc_switch": bool(alive_data.get("dcSwitch", device_lookup[sn]["dc_switch"])),
+                            "battery_soc": _safe_int(alive_data.get("batterySoc")) or device_lookup[sn]["battery_soc"],
+                            "total_battery_percent": _safe_int(alive_data.get("batterySoc")) or device_lookup[sn]["total_battery_percent"],
+                            "power_pv_in": _safe_int(alive_data.get("powerPvIn")) or device_lookup[sn]["power_pv_in"],
+                            "power_grid_in": _safe_int(alive_data.get("powerGridIn")) or device_lookup[sn]["power_grid_in"],
+                            "power_ac_out": _safe_int(alive_data.get("powerAcOut")) or device_lookup[sn]["power_ac_out"],
+                            "power_dc_out": _safe_int(alive_data.get("powerDcOut")) or device_lookup[sn]["power_dc_out"],
+                            "ac_switch": _is_on(alive_data.get("acSwitch")),
+                            "dc_switch": _is_on(alive_data.get("dcSwitch")),
                         })
                 except BluettiCloudApiError:
                     _LOGGER.warning("Failed to get live telemetry for %s", sn)

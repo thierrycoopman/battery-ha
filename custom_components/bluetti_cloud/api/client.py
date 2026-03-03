@@ -162,22 +162,17 @@ class BluettiCloudApi:
         """Fetch all devices with embedded telemetry.
 
         Returns list of device dicts from the homeDevices endpoint.
+        The API returns a flat list of devices in data[].
+        Each device has fields: sn, name, model, sessionState, lastAlive, etc.
         """
         result = await self._request(
             "GET",
             "/api/blusmartprod/device/group/v1/homeDevices",
         )
-        data = result.get("data", {})
-        # homeDevices returns groups; flatten device lists
-        devices = []
+        data = result.get("data")
         if isinstance(data, list):
-            for group in data:
-                device_list = group.get("deviceList", [])
-                devices.extend(device_list)
-        elif isinstance(data, dict):
-            device_list = data.get("deviceList", [])
-            devices.extend(device_list)
-        return devices
+            return data
+        return []
 
     async def get_device_last_alive(self, device_sn: str) -> dict[str, Any]:
         """Fetch detailed live telemetry for a device.

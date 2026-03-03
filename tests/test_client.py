@@ -77,8 +77,8 @@ async def test_get_devices(mock_session, sample_login_response, sample_devices_r
 
     devices = await client.get_devices()
     assert len(devices) == 2
-    assert devices[0]["deviceSn"] == "AC300FAKESERIAL001"
-    assert devices[1]["deviceSn"] == "AC2001234567890"
+    assert devices[0]["sn"] == "AC300FAKESERIAL001"
+    assert devices[1]["sn"] == "AC200FAKESERIAL002"
 
 
 @pytest.mark.asyncio
@@ -92,8 +92,8 @@ async def test_get_device_last_alive(
     await client.login("test@example.com", "password123")
 
     data = await client.get_device_last_alive("AC300FAKESERIAL001")
-    assert data["batterySoc"] == 100
-    assert data["powerPvIn"] == 150
+    assert data["batterySoc"] == "100"
+    assert data["powerPvIn"] == "150"
 
 
 @pytest.mark.asyncio
@@ -114,7 +114,7 @@ async def test_control_device(
 async def test_auto_reauth_on_805(mock_session, sample_login_response):
     """Test that client re-authenticates when it gets a 805 response."""
     expired_response = {"msgCode": 805, "message": "Token expired"}
-    success_response = {"msgCode": 0, "data": [{"groupId": 1, "deviceList": []}]}
+    success_response = {"msgCode": 0, "data": []}
 
     mock_session.post.return_value = _mock_response(sample_login_response)
     mock_session.request.side_effect = [
@@ -155,7 +155,7 @@ async def test_gateway_routing(mock_session, sample_login_response):
     # blusmartprod → gw
     mock_session.request.reset_mock()
     mock_session.request.return_value = _mock_response(
-        {"msgCode": 0, "data": [{"groupId": 1, "deviceList": []}]}
+        {"msgCode": 0, "data": []}
     )
     await client.get_devices()
     call = mock_session.request.call_args

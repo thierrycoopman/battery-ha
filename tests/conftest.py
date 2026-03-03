@@ -29,39 +29,39 @@ def sample_login_failure():
 
 @pytest.fixture
 def sample_devices_response():
-    """homeDevices endpoint response with one device group."""
+    """homeDevices endpoint response — flat list of devices."""
     return {
         "msgCode": 0,
         "message": "OK",
         "data": [
             {
-                "groupId": 1,
-                "groupName": "Home",
-                "deviceList": [
-                    {
-                        "deviceSn": "AC300FAKESERIAL001",
-                        "deviceName": "Winenne",
-                        "productName": "AC300",
-                        "deviceType": "AC300",
-                        "online": True,
-                        "lastAlive": {
-                            "batterySoc": 100,
-                            "powerPvIn": 0,
-                            "powerGridIn": 0,
-                            "powerAcOut": 0,
-                            "powerDcOut": 0,
-                        },
-                    },
-                    {
-                        "deviceSn": "AC2001234567890",
-                        "deviceName": "Backup",
-                        "productName": "AC200",
-                        "deviceType": "AC200",
-                        "online": False,
-                        "lastAlive": None,
-                    },
-                ],
-            }
+                "sn": "AC300FAKESERIAL001",
+                "name": "Winenne",
+                "model": "AC300",
+                "sessionState": "Online",
+                "batSOC": "97",
+                "powerPvIn": 0,
+                "powerGridIn": 0,
+                "powerAcOut": 0,
+                "powerDcOut": 0,
+                "lastAlive": {
+                    "batterySoc": "100",
+                    "powerPvIn": "0",
+                    "powerGridIn": "0",
+                    "powerAcOut": "0",
+                    "powerDcOut": "0",
+                    "acSwitch": "0",
+                    "dcSwitch": "1",
+                },
+            },
+            {
+                "sn": "AC200FAKESERIAL002",
+                "name": "Backup",
+                "model": "AC200",
+                "sessionState": "Offline",
+                "batSOC": "50",
+                "lastAlive": None,
+            },
         ],
     }
 
@@ -74,17 +74,14 @@ def sample_last_alive_response():
         "message": "OK",
         "data": {
             "deviceSn": "AC300FAKESERIAL001",
-            "timestamp": 1709510400000,
-            "batterySoc": 100,
-            "totalBatteryPercent": 100,
-            "powerPvIn": 150,
-            "powerGridIn": 0,
-            "powerAcOut": 200,
-            "powerDcOut": 50,
-            "acSwitch": 1,
-            "dcSwitch": 0,
-            "gridChargeOn": 0,
-            "pvChargeOn": 1,
+            "timestamp": "2026-03-03 20:49:00",
+            "batterySoc": "100",
+            "powerPvIn": "150",
+            "powerGridIn": "0",
+            "powerAcOut": "200",
+            "powerDcOut": "50",
+            "acSwitch": "1",
+            "dcSwitch": "0",
         },
     }
 

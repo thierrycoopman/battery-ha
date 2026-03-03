@@ -93,11 +93,11 @@ class BluettiCloudConfigFlow(ConfigFlow, domain=DOMAIN):
             selected_sns = user_input.get("devices", [])
             device_info = {}
             for dev in self._devices:
-                sn = dev.get("deviceSn", "")
+                sn = dev.get("sn", "")
                 if sn in selected_sns:
                     device_info[sn] = {
-                        "name": dev.get("deviceName", sn),
-                        "model": dev.get("productName", dev.get("deviceType", "Unknown")),
+                        "name": dev.get("name", sn),
+                        "model": dev.get("model", "Unknown"),
                     }
 
             return self.async_create_entry(
@@ -114,10 +114,11 @@ class BluettiCloudConfigFlow(ConfigFlow, domain=DOMAIN):
         options = []
         all_sns = []
         for dev in self._devices:
-            sn = dev.get("deviceSn", "")
-            name = dev.get("deviceName", sn)
-            model = dev.get("productName", dev.get("deviceType", ""))
-            online = "Online" if dev.get("online") else "Offline"
+            sn = dev.get("sn", "")
+            name = dev.get("name", sn)
+            model = dev.get("model", "")
+            session_state = dev.get("sessionState", "Offline")
+            online = session_state if session_state else "Offline"
             options.append(
                 SelectOptionDict(value=sn, label=f"{name} ({model}) - {online}")
             )

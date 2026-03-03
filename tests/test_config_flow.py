@@ -15,11 +15,10 @@ def mock_client():
     client.get_devices = AsyncMock(
         return_value=[
             {
-                "deviceSn": "AC300FAKESERIAL001",
-                "deviceName": "Winenne",
-                "productName": "AC300",
-                "deviceType": "AC300",
-                "online": True,
+                "sn": "AC300FAKESERIAL001",
+                "name": "Winenne",
+                "model": "AC300",
+                "sessionState": "Online",
             },
         ]
     )
@@ -120,14 +119,14 @@ async def test_device_selection_creates_entry():
     flow._password = "password123"
     flow._devices = [
         {
-            "deviceSn": "AC300FAKESERIAL001",
-            "deviceName": "Winenne",
-            "productName": "AC300",
+            "sn": "AC300FAKESERIAL001",
+            "name": "Winenne",
+            "model": "AC300",
         },
         {
-            "deviceSn": "AC2001234567890",
-            "deviceName": "Backup",
-            "productName": "AC200",
+            "sn": "AC2001234567890",
+            "name": "Backup",
+            "model": "AC200",
         },
     ]
 

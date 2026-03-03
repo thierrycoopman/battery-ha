@@ -26,7 +26,7 @@ def mock_hass():
 def mock_api_client(sample_devices_response, sample_last_alive_response):
     client = AsyncMock()
     client.get_devices = AsyncMock(
-        return_value=sample_devices_response["data"][0]["deviceList"]
+        return_value=sample_devices_response["data"]
     )
     client.get_device_last_alive = AsyncMock(
         return_value=sample_last_alive_response["data"]
@@ -83,10 +83,10 @@ async def test_update_skips_telemetry_for_offline_device(
     """Offline devices should not trigger getDeviceLastAlive."""
     mock_api_client.get_devices.return_value = [
         {
-            "deviceSn": "AC300FAKESERIAL001",
-            "deviceName": "Winenne",
-            "productName": "AC300",
-            "online": False,
+            "sn": "AC300FAKESERIAL001",
+            "name": "Winenne",
+            "model": "AC300",
+            "sessionState": "Offline",
             "lastAlive": None,
         }
     ]
