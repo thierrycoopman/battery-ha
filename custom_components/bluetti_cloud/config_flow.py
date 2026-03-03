@@ -7,6 +7,15 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .api.client import AuthenticationError, BluettiCloudApi, BluettiCloudApiError
 from .const import DOMAIN
@@ -15,8 +24,12 @@ _LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required("username"): str,
-        vol.Required("password"): str,
+        vol.Required("username"): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.EMAIL)
+        ),
+        vol.Required("password"): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
     }
 )
 
@@ -97,24 +110,30 @@ class BluettiCloudConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        # Build device options for multi-select
-        device_options = {}
+        # Build device options for multi-select with checkboxes
+        options = []
+        all_sns = []
         for dev in self._devices:
             sn = dev.get("deviceSn", "")
             name = dev.get("deviceName", sn)
             model = dev.get("productName", dev.get("deviceType", ""))
             online = "Online" if dev.get("online") else "Offline"
-            device_options[sn] = f"{name} ({model}) - {online}"
+            options.append(
+                SelectOptionDict(value=sn, label=f"{name} ({model}) - {online}")
+            )
+            all_sns.append(sn)
 
         return self.async_show_form(
             step_id="devices",
             data_schema=vol.Schema(
                 {
-                    vol.Required("devices", default=list(device_options.keys())): vol.All(
-                        vol.Coerce(list),  # noqa: E501
-                        [vol.In(device_options)],
+                    vol.Required("devices", default=all_sns): SelectSelector(
+                        SelectSelectorConfig(
+                            options=options,
+                            multiple=True,
+                            mode=SelectSelectorMode.LIST,
+                        )
                     ),
                 }
             ),
-            description_placeholders={"devices": str(len(self._devices))},
         )
