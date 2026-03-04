@@ -9,7 +9,7 @@ and server-time TOTP authentication.
 The connection flow:
 1. Get server UTC time from API (critical — TOTP uses server time, not local)
 2. Download P12 client certificate from API (requires TOTP + AES signature chain)
-3. Extract PEM cert/key from P12 using openssl
+3. Extract PEM cert/key from P12 using Python cryptography library
 4. Connect to MQTT broker with mTLS + TOTP password
 5. Subscribe to telemetry topics and publish commands
 """
@@ -21,7 +21,6 @@ import hashlib
 import logging
 import os
 import ssl
-import subprocess
 import tempfile
 import time
 import uuid
@@ -78,6 +77,35 @@ def _get_request_sign(sid: str, app_ver: str, url: str, utc_time: int) -> str:
     return hashlib.md5(query.encode("utf-8")).hexdigest().upper()
 
 
+def _extract_pem_from_pfx(pfx_data: bytes, cert_pw: str) -> tuple[bytes, bytes]:
+    """Extract PEM certificate and key from P12/PFX data (pure Python).
+
+    Uses the cryptography library instead of openssl CLI, so it works
+    in environments where openssl is not installed (e.g., HA OS Docker).
+
+    Returns (cert_pem_bytes, key_pem_bytes).
+    """
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+        pkcs12,
+    )
+
+    private_key, certificate, _ = pkcs12.load_key_and_certificates(
+        pfx_data, cert_pw.encode("utf-8")
+    )
+
+    if not certificate or not private_key:
+        raise BluettiMqttError("P12 certificate or key is empty")
+
+    cert_pem = certificate.public_bytes(Encoding.PEM)
+    key_pem = private_key.private_bytes(
+        Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption()
+    )
+    return cert_pem, key_pem
+
+
 # Type alias for the telemetry callback:
 # (topic: str, parsed_data: dict[str, Any]) -> None
 TelemetryCallback = Callable[[str, dict[str, Any]], None]
@@ -107,6 +135,9 @@ class BluettiMqttClient:
         self._connect_error: str | None = None
         self._pem_cert: str | None = None
         self._pem_key: str | None = None
+        # Raw P12 data + password for extraction in blocking phase
+        self._pfx_data: bytes | None = None
+        self._cert_pw: str | None = None
         # Topics to (re-)subscribe on connect
         self._subscriptions: set[str] = set()
 
@@ -139,7 +170,11 @@ class BluettiMqttClient:
         return None, None
 
     async def _download_certificates(self) -> None:
-        """Download P12 certificate and extract PEM files."""
+        """Download P12 certificate data from Bluetti cloud (async HTTP only).
+
+        Stores raw P12 data and password for extraction in the blocking phase.
+        No file I/O or subprocess calls — safe to run on the HA event loop.
+        """
         if not HAS_CRYPTO:
             raise BluettiMqttError("pycryptodome is required for MQTT control")
 
@@ -164,11 +199,16 @@ class BluettiMqttClient:
         if not utc_time or not signature:
             raise BluettiMqttError("Cannot get server time for certificate download")
 
-        # Get user ID
+        # Get user ID (with null safety)
         async with self._session.get(
             f"{GW_URL}/api/bluuc/uc/v1/basic/get", headers=headers
         ) as resp:
-            user_id = (await resp.json()).get("data", {}).get("uid")
+            resp_json = await resp.json()
+            data = resp_json.get("data") or {}
+            user_id = data.get("uid") if isinstance(data, dict) else None
+
+        if not user_id:
+            raise BluettiMqttError("Cannot get user ID for certificate download")
 
         # Derive cert password from signature
         req_sign = _get_request_sign(
@@ -207,37 +247,34 @@ class BluettiMqttClient:
         if not pfx_data:
             raise BluettiMqttError("Failed to download P12 certificate")
 
-        # Write P12 and extract PEM
-        pfx_path = os.path.join(tempfile.gettempdir(), "bluetti_ha_cert.p12")
+        # Store raw P12 data for extraction in blocking phase
+        self._pfx_data = pfx_data
+        self._cert_pw = cert_pw
+        _LOGGER.debug("P12 certificate downloaded (%d bytes)", len(pfx_data))
+
+    def _extract_and_write_pem(self) -> None:
+        """Extract PEM from P12 and write to temp files (blocking — executor only).
+
+        Must be called from a thread (not the event loop).
+        """
+        if not self._pfx_data or not self._cert_pw:
+            raise BluettiMqttError("No P12 data available for PEM extraction")
+
+        cert_pem, key_pem = _extract_pem_from_pfx(self._pfx_data, self._cert_pw)
+
         self._pem_cert = os.path.join(tempfile.gettempdir(), "bluetti_ha_cert.pem")
         self._pem_key = os.path.join(tempfile.gettempdir(), "bluetti_ha_key.pem")
 
-        with open(pfx_path, "wb") as f:
-            f.write(pfx_data)
+        with open(self._pem_cert, "wb") as f:
+            f.write(cert_pem)
+        with open(self._pem_key, "wb") as f:
+            f.write(key_pem)
 
-        for legacy in [True, False]:
-            extras = ["-legacy"] if legacy else []
-            r1 = subprocess.run(
-                ["openssl", "pkcs12", "-in", pfx_path, "-out", self._pem_cert,
-                 "-clcerts", "-nokeys", "-passin", f"pass:{cert_pw}"] + extras,
-                capture_output=True,
-            )
-            r2 = subprocess.run(
-                ["openssl", "pkcs12", "-in", pfx_path, "-out", self._pem_key,
-                 "-nocerts", "-nodes", "-passin", f"pass:{cert_pw}"] + extras,
-                capture_output=True,
-            )
-            if r1.returncode == 0 and r2.returncode == 0:
-                _LOGGER.debug("P12 certificate extracted successfully")
-                break
-        else:
-            raise BluettiMqttError("Failed to extract PEM from P12 certificate")
+        # Clear sensitive data from memory
+        self._pfx_data = None
+        self._cert_pw = None
 
-        # Clean up P12
-        try:
-            os.unlink(pfx_path)
-        except OSError:
-            pass
+        _LOGGER.debug("PEM certificate extracted successfully")
 
     async def async_prepare(self) -> dict:
         """Async phase: download certificates + get TOTP (uses aiohttp on HA loop).
@@ -246,7 +283,7 @@ class BluettiMqttClient:
         Must be called from the HA event loop (where the aiohttp session lives).
         """
         # Download certificates if needed
-        if not self._pem_cert or not os.path.exists(self._pem_cert):
+        if not self._pfx_data and (not self._pem_cert or not os.path.exists(self._pem_cert)):
             await self._download_certificates()
 
         parts = self._token.split(".")
@@ -276,19 +313,24 @@ class BluettiMqttClient:
         ).hexdigest()
 
         return {
-            "pem_cert": self._pem_cert,
-            "pem_key": self._pem_key,
             "mqtt_user": mqtt_user,
             "mqtt_pass": mqtt_pass,
             "client_id": client_id,
         }
 
     def connect_blocking(self, prep: dict) -> None:
-        """Blocking phase: TCP+TLS connect to MQTT broker (runs in executor thread).
+        """Blocking phase: extract PEM + TCP+TLS connect (runs in executor thread).
 
-        Takes the preparation dict from async_prepare(). This method uses
-        time.sleep() for polling and must NOT be called from the event loop.
+        Takes the preparation dict from async_prepare(). This method does
+        file I/O and time.sleep() and must NOT be called from the event loop.
         """
+        # Extract PEM from P12 if we have raw data (first connect)
+        if self._pfx_data:
+            self._extract_and_write_pem()
+
+        if not self._pem_cert or not self._pem_key:
+            raise BluettiMqttError("No PEM certificate files available")
+
         # TLS context with client certificate
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
@@ -297,7 +339,7 @@ class BluettiMqttClient:
             ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
         except Exception:
             pass
-        ctx.load_cert_chain(prep["pem_cert"], prep["pem_key"])
+        ctx.load_cert_chain(self._pem_cert, self._pem_key)
 
         self._connected = False
         self._connect_error = None
