@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![GitHub Release](https://img.shields.io/github/v/release/thierrycoopman/battery-ha)](https://github.com/thierrycoopman/battery-ha/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 [![Vibe Coded](https://img.shields.io/badge/Vibe%20Coded-with%20Claude%20Code-cc785c?logo=claude&logoColor=cc785c)](https://claude.ai/code)
 
 > **Personal Project Disclaimer**
