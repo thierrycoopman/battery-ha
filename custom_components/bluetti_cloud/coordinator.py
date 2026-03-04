@@ -39,6 +39,7 @@ from .api.modbus import (
     PACK_ITEM_INFO_COUNT,
     PACK_MAIN_INFO,
     PACK_MAIN_INFO_COUNT,
+    PACK_SELECT,
     parse_fc16_registers,
     parse_home_data,
     parse_pack_item_info,
@@ -192,7 +193,12 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._response_event: asyncio.Event = asyncio.Event()
         self._response_data: bytes | None = None
         # Discovered pack counts per device (for dynamic sensor creation)
+        # This tracks actually connected packs (not hardware slots)
         self._pack_counts: dict[str, int] = {}
+        # Hardware max pack slots per device (from pack_num_max register)
+        self._pack_slots: dict[str, int] = {}
+        # Which pack IDs have been seen with real data (non-zero voltage/SOC)
+        self._discovered_packs: dict[str, set[int]] = {}
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
         # Registers that returned Modbus errors — skip in future polls
@@ -649,8 +655,9 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         """Parse FC=16 register block using the AC300 register map.
 
         Maps raw Modbus register values to coordinator data keys.
-        Handles per-pack data cycling (register 96 = pack_num selects
-        which pack's data appears in registers 97-99).
+        Handles per-pack data cycling: when pack data arrives (start_addr=70),
+        stores it under pack_{N}_ keys, then advances to the next pack by
+        writing register 3006.
         """
         fields = parse_fc16_registers(start_addr, register_data)
         if not fields:
@@ -671,7 +678,6 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             "dc_output_on": "dc_switch",
             "ctrl_ac_switch": "ac_switch",
             "ctrl_dc_switch": "dc_switch",
-            "pack_num_max": "pack_count",
             "charging_status": "charging_status",
         }
 
@@ -679,7 +685,7 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             if src_key in fields:
                 mqtt_overlay[dst_key] = fields[src_key]
 
-        # Also populate pack_total_* fields (same as pack_* for aggregate values)
+        # Populate pack_total_* fields (aggregate values)
         if "total_battery_voltage" in fields:
             mqtt_overlay["pack_total_voltage"] = fields["total_battery_voltage"]
         if "total_battery_current" in fields:
@@ -687,31 +693,15 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if "total_battery_percent" in fields:
             mqtt_overlay["pack_total_soc"] = fields["total_battery_percent"]
 
-        # Handle per-pack data: reg 96 tells us which pack, regs 97-99 are its data
-        pack_num = fields.get("pack_num")
-        if pack_num and pack_num > 0:
-            prefix = f"pack_{pack_num}_"
-            if "pack_voltage" in fields:
-                mqtt_overlay[f"{prefix}voltage"] = fields["pack_voltage"]
-            if "pack_battery_percent" in fields:
-                mqtt_overlay[f"{prefix}soc"] = fields["pack_battery_percent"]
-            if "charging_status" in fields:
-                mqtt_overlay[f"{prefix}charging_status"] = fields["charging_status"]
+        # Track hardware pack slots (pack_num_max)
+        pack_num_max = fields.get("pack_num_max")
+        if pack_num_max and pack_num_max > 0:
+            self._pack_slots[sn] = pack_num_max
 
-        # Track pack count for dynamic sensor creation
-        pack_count = fields.get("pack_num_max")
-        if pack_count and pack_count > 0 and pack_count != self._pack_counts.get(sn, 0):
-            old_count = self._pack_counts.get(sn, 0)
-            self._pack_counts[sn] = pack_count
-            _LOGGER.info(
-                "Device %s: discovered %d battery packs (was %d)",
-                sn, pack_count, old_count,
-            )
-            for cb in self._new_pack_callbacks:
-                try:
-                    cb(sn, pack_count)
-                except Exception:
-                    _LOGGER.exception("Error in new pack callback")
+        # Handle per-pack data and cycling
+        pack_num = fields.get("pack_num")
+        if pack_num is not None and pack_num > 0:
+            self._process_per_pack_data(sn, pack_num, fields)
 
         if _LOGGER.isEnabledFor(logging.DEBUG):
             logged_fields = {k: v for k, v in fields.items()
@@ -720,6 +710,73 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()
+
+    def _process_per_pack_data(
+        self, sn: str, pack_num: int, fields: dict[str, Any]
+    ) -> None:
+        """Store per-pack data and advance pack cycling.
+
+        When data arrives for pack N, stores it under pack_{N}_ keys.
+        Then writes register 3006 to select the next pack, so the next
+        FC=16 push at start_addr=70 will contain that pack's data.
+        """
+        mqtt_overlay = self._mqtt_data.setdefault(sn, {})
+        prefix = f"pack_{pack_num}_"
+
+        if "pack_voltage" in fields:
+            mqtt_overlay[f"{prefix}voltage"] = fields["pack_voltage"]
+        if "pack_battery_percent" in fields:
+            mqtt_overlay[f"{prefix}soc"] = fields["pack_battery_percent"]
+        if "charging_status" in fields:
+            mqtt_overlay[f"{prefix}charging_status"] = fields["charging_status"]
+
+        # Track which packs have real data (non-zero voltage or SOC)
+        pack_voltage = fields.get("pack_voltage", 0)
+        pack_soc = fields.get("pack_battery_percent", 0)
+        if pack_voltage > 0 or pack_soc > 0:
+            discovered = self._discovered_packs.setdefault(sn, set())
+            was_new = pack_num not in discovered
+            discovered.add(pack_num)
+
+            # Update pack_count based on actually connected packs
+            connected_count = len(discovered)
+            if connected_count != self._pack_counts.get(sn, 0):
+                old_count = self._pack_counts.get(sn, 0)
+                self._pack_counts[sn] = connected_count
+                if was_new:
+                    _LOGGER.info(
+                        "Device %s: discovered battery pack %d "
+                        "(soc=%s%% voltage=%sV, %d packs total)",
+                        sn, pack_num, pack_soc, pack_voltage, connected_count,
+                    )
+                    for cb in self._new_pack_callbacks:
+                        try:
+                            cb(sn, connected_count)
+                        except Exception:
+                            _LOGGER.exception("Error in new pack callback")
+
+        # Advance to next pack for cycling
+        pack_slots = self._pack_slots.get(sn, 0)
+        if pack_slots > 1:
+            next_pack = (pack_num % pack_slots) + 1
+            self._send_pack_select(sn, next_pack)
+
+    def _send_pack_select(self, sn: str, pack_num: int) -> None:
+        """Write register 3006 to select which pack reports in registers 96-99."""
+        if not self._mqtt_client or not self._mqtt_client.is_connected:
+            return
+        dev_data = (self.data or {}).get(sn)
+        if not dev_data:
+            return
+        model = dev_data.get("device_type", "")
+        sub_sn = dev_data.get("sub_sn", "")
+        if not model or not sub_sn:
+            return
+        try:
+            self._mqtt_client.send_command(model, sub_sn, PACK_SELECT, pack_num)
+            _LOGGER.debug("Pack select: %s → pack %d", sn, pack_num)
+        except BluettiMqttError:
+            _LOGGER.debug("Failed to send pack select for %s", sn)
 
     def _handle_write_echo(self, sn: str, parsed: dict) -> None:
         """Process FC=06 write echo (switch command confirmation)."""

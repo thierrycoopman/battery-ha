@@ -16,8 +16,9 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 # Modbus register addresses for AC300 (ProtocolAddr, protocolVer < 2020)
-AC_SWITCH = 3007  # 0x0BBF — ProtocolAddr.AC_SWITCH
-DC_SWITCH = 3008  # 0x0BC0 — ProtocolAddr.DC_SWITCH
+PACK_SELECT = 3006  # Write to select which battery pack reports in regs 96-99
+AC_SWITCH = 3007    # 0x0BBF — ProtocolAddr.AC_SWITCH
+DC_SWITCH = 3008    # 0x0BC0 — ProtocolAddr.DC_SWITCH
 
 # Switch command values: simple 0/1 for AC300
 SWITCH_ON = 1
@@ -357,7 +358,10 @@ _AC300_REGISTER_MAP: dict[int, tuple[str, str]] = {
     48: ("ac_output_on", "bool"),            # AC output switch
     49: ("dc_output_on", "bool"),            # DC output switch
     # Block start_addr=70 (registers 70-129)
-    91: ("pack_num_max", "u16"),             # Number of connected packs
+    86: ("pv_input_voltage", "div10"),       # PV panel voltage (V)
+    87: ("pv_input_power", "u16"),           # PV panel power (W)
+    88: ("pv_input_current", "div10"),       # PV panel current (A)
+    91: ("pack_num_max", "u16"),             # Number of pack slots (hardware max)
     92: ("total_battery_voltage", "div10"),  # Aggregate voltage (V)
     93: ("total_battery_current", "div10"),  # Aggregate current (A)
     96: ("pack_num", "u16"),                 # Currently reported pack index
