@@ -49,19 +49,19 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 ### Architecture
 
 ```
-                                  ┌──────────────────┐
-  MQTT (real-time, ~1s)           │                  │    REST API (every 60s)
-  ┌─ FC=16 data pushes (AC300)   │                  │
-  ├─ Battery SOC, voltage, amps  │   Coordinator    │ <── homeDevices + lastAlive
-  ├─ Per-pack cycling (reg 3006) │   (data merge)   │     + energyDetail
-  └─ Switch state echoes         │                  │
-       │                         └────────┬─────────┘
-       │    SUB/{model}/{subSn} ──>       │
-       └──  PUB/{model}/{subSn} <──       │
-            Modbus RTU frames    HA entity state updates
+ MQTT (real-time)                                          REST API (every 60s)
+                          ┌────────────────────┐
+  FC=16 data pushes  ───> │                    │ <───  homeDevices + lastAlive
+  Battery, packs,    ───> │    Coordinator     │ <───  energyDetail
+  switch echoes      ───> │                    │ <───  online status
+                          └─────────┬──────────┘
+  SUB/{model}/{subSn} ──>          │
+  PUB/{model}/{subSn} <──          │
+  (Modbus RTU frames)              │
+                          HA entity state updates
 ```
 
-MQTT data takes precedence for fields it provides (more current). REST fills in power readings, energy totals, and online status that MQTT doesn't provide on older devices.
+MQTT data takes precedence (more current). REST fills in power readings, energy totals, and online status that MQTT doesn't provide on older devices.
 
 ## Entities
 
