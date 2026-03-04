@@ -243,7 +243,7 @@ async def test_mqtt_telemetry_merges_into_data(
 async def test_mqtt_disconnect_restores_rest_interval(
     mock_hass, mock_config_entry, mock_api_client, device_sns, device_info
 ):
-    """Test that REST interval is restored when MQTT disconnects."""
+    """Test that REST interval is restored and reconnection is scheduled when MQTT disconnects."""
     from datetime import timedelta
     from custom_components.bluetti_cloud.const import DEFAULT_SCAN_INTERVAL
 
@@ -257,7 +257,11 @@ async def test_mqtt_disconnect_restores_rest_interval(
     mock_mqtt.is_connected = False
     coordinator._mqtt_client = mock_mqtt
 
-    await coordinator._async_update_data()
+    # Prevent actual reconnect loop coroutine from being created
+    with patch.object(coordinator, "_schedule_reconnect") as mock_reconnect:
+        await coordinator._async_update_data()
 
     assert coordinator._mqtt_connected is False
     assert coordinator.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+    # Verify reconnection was scheduled
+    mock_reconnect.assert_called_once()

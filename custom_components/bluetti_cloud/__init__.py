@@ -46,9 +46,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_start_mqtt()
     except Exception:
         _LOGGER.warning(
-            "MQTT telemetry unavailable — using REST-only mode (30s polling)",
+            "MQTT unavailable on startup — will retry with backoff",
             exc_info=True,
         )
+        coordinator._schedule_reconnect()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 

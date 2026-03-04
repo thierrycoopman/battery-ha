@@ -50,6 +50,8 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MQTT_POLL_INTERVAL,
+    MQTT_RECONNECT_MAX,
+    MQTT_RECONNECT_MIN,
     MQTT_REQUEST_TIMEOUT,
     MQTT_SCAN_INTERVAL,
 )
@@ -186,6 +188,11 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         # Cache last known data so entities don't go unavailable on transient errors
         self._last_good_data: dict[str, dict[str, Any]] = {}
 
+        # -- MQTT reconnection state --
+        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_delay: int = MQTT_RECONNECT_MIN
+        self._stopping: bool = False
+
         # -- Active MQTT polling state --
         self._poll_task: asyncio.Task | None = None
         # Pending request tracking for response routing
@@ -237,13 +244,19 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         Called after the first REST refresh so we have device model/subSn data.
         Two-phase connect: async HTTP on HA loop, then blocking paho in executor.
+        Each attempt uses a fresh token and fresh P12 certs/TOTP to avoid
+        stale credential issues.
         """
         if self._mqtt_client and self._mqtt_client.is_connected:
             return
 
+        # Use the latest token (REST polling may have refreshed it)
         token = self._client._token
         if not token:
             raise BluettiMqttError("API not authenticated — cannot start MQTT")
+
+        # Clean up any previous client before creating a new one
+        self._cleanup_mqtt_client()
 
         self._mqtt_client = BluettiMqttClient(
             session=self._client._session,
@@ -261,6 +274,7 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         )
 
         self._mqtt_connected = True
+        self._reconnect_delay = MQTT_RECONNECT_MIN  # Reset backoff on success
 
         # Subscribe to telemetry for all configured devices
         if self.data:
@@ -282,6 +296,17 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         # Start active polling loop
         self._start_polling()
 
+    def _cleanup_mqtt_client(self) -> None:
+        """Clean up MQTT client and polling task without affecting reconnection."""
+        if self._poll_task and not self._poll_task.done():
+            self._poll_task.cancel()
+            self._poll_task = None
+        if self._mqtt_client:
+            self._mqtt_client.disconnect()
+            self._mqtt_client.cleanup_pem_files()
+            self._mqtt_client = None
+        self._mqtt_connected = False
+
     def _start_polling(self) -> None:
         """Start the active MQTT polling task."""
         if self._poll_task and not self._poll_task.done():
@@ -291,18 +316,64 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         )
 
     def async_stop_mqtt(self) -> None:
-        """Disconnect MQTT client and clean up."""
-        if self._poll_task and not self._poll_task.done():
-            self._poll_task.cancel()
-            self._poll_task = None
-        if self._mqtt_client:
-            self._mqtt_client.disconnect()
-            self._mqtt_client.cleanup_pem_files()
-            self._mqtt_client = None
-        self._mqtt_connected = False
+        """Disconnect MQTT client, cancel reconnection, and clean up."""
+        self._stopping = True
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+        self._cleanup_mqtt_client()
         self._topic_to_sn.clear()
         # Restore faster REST polling
         self.update_interval = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+
+    def _schedule_reconnect(self) -> None:
+        """Schedule MQTT reconnection with exponential backoff.
+
+        Safe to call multiple times — only starts one reconnect loop.
+        """
+        if self._stopping:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return  # Already reconnecting
+        self._reconnect_task = self.hass.async_create_task(
+            self._reconnect_loop(), "bluetti_mqtt_reconnect"
+        )
+
+    async def _reconnect_loop(self) -> None:
+        """Retry MQTT connection with exponential backoff (30s → 60s → 120s → 300s).
+
+        Each attempt uses fresh credentials (token, P12 cert, TOTP) since these
+        are time-sensitive. On success, resets the backoff delay. On failure,
+        doubles the delay up to MQTT_RECONNECT_MAX.
+        """
+        try:
+            while not self._stopping:
+                _LOGGER.info(
+                    "MQTT reconnect scheduled in %ds", self._reconnect_delay
+                )
+                await asyncio.sleep(self._reconnect_delay)
+
+                if self._stopping:
+                    break
+
+                try:
+                    await self.async_start_mqtt()
+                    _LOGGER.info("MQTT reconnected successfully")
+                    return  # Success — exit the loop
+                except Exception:
+                    _LOGGER.warning(
+                        "MQTT reconnect failed — next attempt in %ds",
+                        min(self._reconnect_delay * 2, MQTT_RECONNECT_MAX),
+                        exc_info=True,
+                    )
+                    # Clean up the failed attempt
+                    self._cleanup_mqtt_client()
+                    # Exponential backoff
+                    self._reconnect_delay = min(
+                        self._reconnect_delay * 2, MQTT_RECONNECT_MAX
+                    )
+        except asyncio.CancelledError:
+            _LOGGER.debug("MQTT reconnect loop cancelled")
 
     # -- Active MQTT polling --
 
@@ -832,14 +903,13 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Fetch data from the Bluetti Cloud API (periodic REST poll)."""
-        # Check if MQTT disconnected unexpectedly — restore faster REST polling
+        # Check MQTT status and handle reconnection
         if self._mqtt_connected and self._mqtt_client and not self._mqtt_client.is_connected:
-            _LOGGER.warning(
-                "MQTT disconnected — restoring REST interval to %ds",
-                DEFAULT_SCAN_INTERVAL,
-            )
-            self._mqtt_connected = False
+            # Connection dropped mid-session — clean up and schedule reconnect
+            _LOGGER.warning("MQTT disconnected — scheduling reconnection")
+            self._cleanup_mqtt_client()
             self.update_interval = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+            self._schedule_reconnect()
 
         try:
             all_devices = await self._client.get_devices()
