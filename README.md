@@ -3,8 +3,48 @@
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![GitHub Release](https://img.shields.io/github/v/release/thierrycoopman/battery-ha)](https://github.com/thierrycoopman/battery-ha/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Vibe Coded](https://img.shields.io/badge/Vibe%20Coded-with%20Claude%20Code-cc785c?logo=claude&logoColor=cc785c)](https://claude.ai/code)
 
-A custom Home Assistant integration that connects to Bluetti power stations via the Bluetti Cloud mobile app API. This integration supports devices that are **not covered** by the official Bluetti HA integration (e.g., AC300, AC200, and other older models).
+> **Personal Project Disclaimer**
+>
+> This integration exists because I needed it. My AC300 + 2x B300 battery packs showed as "offline" in every existing Home Assistant integration, even though they worked perfectly fine in the Bluetti mobile app. No existing solution supported my hardware, so I built my own.
+>
+> **This is a personal project scratching a personal itch.** It works on my setup (AC300 with 2 battery packs), but there is absolutely no guarantee it will work on yours. There is no support, no roadmap, and no commitment to maintain this beyond my own needs. If you choose to use it, **you do so entirely at your own risk and responsibility.**
+>
+> I'm sharing it in case someone else has the same problem, but I cannot help you debug your specific device, fix issues with models I don't own, or provide any form of support.
+
+---
+
+## How This Was Built
+
+This entire integration was **vibe coded with [Claude Code](https://claude.ai/code)** — Anthropic's agentic coding tool. Every line of code, every test, every reverse-engineering session was done in conversation with Claude.
+
+### The journey
+
+The Bluetti ecosystem has no public API documentation. Getting from "my device shows offline in HA" to "full real-time telemetry with per-battery pack sensors" required weeks of reverse engineering:
+
+1. **Started with the official HA API** (`/ha/v1/` namespace) — discovered it only supports newer devices. My AC300 was invisible.
+
+2. **Decompiled the Bluetti Android APK** (v3.0.6) — extracted the mobile app's private API endpoints, authentication flow, and encryption schemes. Discovered the app uses a completely different API (`/api/blusmartprod/`, `/api/bluiotdata/`) with its own `APP_ID`, SHA-256 password hashing, and AES-encrypted password fields.
+
+3. **Cracked the MQTT authentication** — the app connects to an MQTT broker (`iot.bluettipower.com:18760`) using mTLS with P12 client certificates. Getting a valid certificate requires a chain of: server-time fetch → AES signature decryption → TOTP generation → AES cert password encryption → P12 download → PEM extraction. Every step was reverse-engineered from the APK's Java bytecode.
+
+4. **Decoded the Modbus protocol** — the MQTT messages are Modbus RTU frames (function codes 0x03 and 0x06) with a protocol prefix byte. Register maps were extracted from `ProtocolParserV2.java` and `ProtocolAddrV2.java` in the decompiled APK.
+
+5. **Discovered active polling** (v0.5.0) — the device doesn't push telemetry voluntarily. The mobile app sends FC=03 read requests for specific register addresses (100 for homeData, 6000 for PackMainInfo, 6100 for per-battery PackItemInfo), and the device responds. Without these requests, many sensors stayed "Unknown".
+
+### Build process
+
+Claude Code handled the full development cycle:
+- **Architecture design** — hybrid MQTT+REST coordinator pattern, two-phase MQTT connect (async HTTP + blocking paho), thread-safe telemetry dispatch
+- **Implementation** — all Python code, Home Assistant platform integrations (sensors, switches, binary sensors, config flow), Modbus frame builders/parsers
+- **Testing** — 101 unit tests covering CRC calculations, frame building/parsing, register maps, sensor descriptions, switch commands, coordinator data flow
+- **Reverse engineering** — APK decompilation analysis, protocol documentation, iterative testing against real hardware
+- **Debugging** — traced issues like the server-time TOTP requirement (local time doesn't work), the empty `token_type` field in OAuth responses, the `iotSession` always showing "Offline" even when devices are controllable
+
+No code was written by hand. This README was also written by Claude.
+
+---
 
 ## Why This Integration?
 
@@ -14,7 +54,9 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 
 ## Features
 
-- **Real-time MQTT telemetry** — Battery SOC, pack voltage/current, charging status updated in ~1 second via MQTT push
+- **Active MQTT polling** — Sends Modbus FC=03 read requests every 10s for real-time battery data, matching the mobile app's behavior
+- **Per-battery pack sensors** — Individual voltage, current, SOC, SOH, temperature, and charging status for each connected battery pack
+- **Real-time MQTT telemetry** — Battery SOC, pack voltage/current, charging status updated via MQTT push
 - **REST API fallback** — Power readings, energy totals, and online status polled every 60s (30s if MQTT unavailable)
 - **AC/DC control** — Switch entities to toggle AC and DC outputs via MQTT with optimistic state updates
 - **Power monitoring** — PV input, grid input, AC output, DC output, grid feed-in (in Watts)
@@ -26,13 +68,16 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 ### Architecture
 
 ```
-                          ┌──────────────┐
-  MQTT (real-time ~1s)    │              │    REST API (every 60s)
-  PUB/{model}/{subSn} ──> │  Coordinator  │ <── homeDevices + lastAlive + energyDetail
-  Modbus RTU frames       │              │
-                          └──────┬───────┘
-                                 │
-                    HA entity state updates
+                                  ┌──────────────────┐
+  MQTT Polling (every 10s)        │                  │    REST API (every 60s)
+  ┌─ FC=03 reg 100 (homeData)     │                  │
+  ├─ FC=03 reg 6000 (PackMain)    │   Coordinator    │ <── homeDevices + lastAlive
+  ├─ FC=03 reg 6100 slave=1       │                  │     + energyDetail
+  └─ FC=03 reg 6100 slave=2       │                  │
+       │                          └────────┬─────────┘
+       │    SUB/{model}/{subSn} ──>        │
+       └──  PUB/{model}/{subSn} <──        │
+            Modbus RTU frames     HA entity state updates
 ```
 
 ## Supported Devices
@@ -43,6 +88,8 @@ Any Bluetti device that appears in the Bluetti mobile app should work, including
 - EB3A, EB55, EB70
 - EP500, EP500Pro, EP600
 - And others
+
+**Tested on:** AC300 + 2x B300 battery packs. Other models may or may not work — see disclaimer above.
 
 ## Installation
 
@@ -93,6 +140,13 @@ For each selected device, the following entities are created:
 | Charging Status | Current charging state (charging/discharging/standby) | — | MQTT |
 | Charge Time Remaining | Estimated time to full charge | min | MQTT |
 | Discharge Time Remaining | Estimated time to empty | min | MQTT |
+| Battery Total Voltage | Aggregate battery voltage from PackMainInfo | V | MQTT |
+| Battery Total Current | Aggregate battery current from PackMainInfo | A | MQTT |
+| Battery Total SOC | Aggregate state of charge from PackMainInfo | % | MQTT |
+| Battery Health | Battery state of health (SOH) | % | MQTT |
+| Battery Temperature | Average battery temperature | °C | MQTT |
+| Time to Full Charge | Time until batteries are fully charged | min | MQTT |
+| Time to Empty | Time until batteries are empty | min | MQTT |
 | Solar Power | PV input power | W | REST |
 | Grid Input Power | Grid/AC charging power | W | REST |
 | AC Output Power | AC output power | W | REST |
@@ -102,6 +156,19 @@ For each selected device, the following entities are created:
 | Energy This Month | Energy generated this month | kWh | REST |
 | Energy This Year | Energy generated this year | kWh | REST |
 | Lifetime Energy | Total lifetime energy | kWh | REST |
+
+### Per-Battery Pack Sensors (dynamic)
+
+Created automatically for each discovered battery pack (e.g., 2 packs = 12 sensors):
+
+| Entity | Description | Unit |
+|--------|-------------|------|
+| Pack N Voltage | Individual pack voltage | V |
+| Pack N Current | Individual pack current | A |
+| Pack N SOC | Individual pack state of charge | % |
+| Pack N Health | Individual pack state of health | % |
+| Pack N Temperature | Individual pack temperature | °C |
+| Pack N Charging Status | Individual pack charging state | — |
 
 ### Binary Sensors
 | Entity | Description |
@@ -116,9 +183,9 @@ For each selected device, the following entities are created:
 
 ## How It Works
 
-The integration uses a **hybrid MQTT + REST** architecture:
+The integration uses a **hybrid MQTT + REST** architecture with **active polling**:
 
-1. **MQTT (primary)** — Connects to `iot.bluettipower.com:18760` using mTLS client certificates and TOTP authentication. Receives real-time Modbus RTU telemetry frames with battery, pack, and switch state data. Also sends switch commands.
+1. **MQTT Active Polling (primary)** — Connects to `iot.bluettipower.com:18760` using mTLS client certificates and TOTP authentication. Every 10 seconds, sends Modbus FC=03 read requests for homeData (register 100), PackMainInfo (register 6000), and PackItemInfo (register 6100, one per battery pack). The device responds with the requested data on the PUB topic. Responses are routed to the correct parser based on request tracking (FC=03 responses don't include the register address).
 
 2. **REST API (complementary)** — Polls the Bluetti mobile app API every 60 seconds for power readings, energy totals, and online status. These fields are not available via MQTT on older devices (protocolVer < 2001).
 
@@ -136,6 +203,9 @@ Check your internet connection. The Bluetti cloud servers may occasionally be un
 
 ### MQTT sensors show "unavailable"
 MQTT telemetry sensors (Pack Voltage, Pack Current, Charging Status, etc.) require an active MQTT connection. Check your HA logs for MQTT connection errors. The integration will fall back to REST polling for non-MQTT sensors.
+
+### Per-pack sensors not appearing
+Per-battery pack sensors are created dynamically when the integration discovers how many packs are connected. This happens after the first successful PackMainInfo read (within 10-20 seconds of MQTT connecting). If they don't appear, check logs for MQTT polling errors.
 
 ### Switches not responding
 Switch control requires MQTT connectivity. If MQTT cannot connect, switches will not work. Check the HA log for `"MQTT telemetry unavailable"` messages. Common causes:
@@ -159,6 +229,9 @@ source venv/bin/activate
 
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous
+
+# Run tests
+python -m pytest tests/ -v
 ```
 
 ## License
