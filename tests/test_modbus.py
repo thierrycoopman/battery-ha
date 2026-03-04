@@ -7,7 +7,11 @@ import pytest
 from custom_components.bluetti_cloud.api.modbus import (
     AC_SWITCH,
     DC_SWITCH,
+    EXCEPTION_ILLEGAL_DATA_ADDRESS,
+    EXCEPTION_ILLEGAL_FUNCTION,
+    FUNC_ERROR_MASK,
     FUNC_READ_HOLDING,
+    FUNC_WRITE_MULTIPLE,
     FUNC_WRITE_SINGLE,
     HOME_DATA,
     HOME_DATA_COUNT,
@@ -213,6 +217,79 @@ def test_parse_mqtt_payload_none_on_invalid():
     assert parse_mqtt_payload(b"") is None
     assert parse_mqtt_payload(None) is None
     assert parse_mqtt_payload(b"\x01\x02\x03") is None
+
+
+# -- FC=0x83 error response parsing --
+
+def test_parse_mqtt_payload_fc83_error():
+    """Parse a Modbus error response (FC=0x83 = error for FC=0x03)."""
+    # [slave=1] [FC=0x83] [exception=0x02] [CRC]
+    frame = bytearray([0x01, 0x83, 0x02])
+    frame += crc16_modbus(bytes(frame))
+    payload = bytes([0x01]) + bytes(frame)
+
+    result = parse_mqtt_payload(payload)
+    assert result is not None
+    assert result["is_error"] is True
+    assert result["original_fc"] == FUNC_READ_HOLDING
+    assert result["exception_code"] == EXCEPTION_ILLEGAL_DATA_ADDRESS
+
+
+def test_parse_mqtt_payload_fc86_error():
+    """Parse a Modbus error response for FC=0x06 write."""
+    frame = bytearray([0x01, 0x86, 0x01])  # Illegal function
+    frame += crc16_modbus(bytes(frame))
+    payload = bytes([0x01]) + bytes(frame)
+
+    result = parse_mqtt_payload(payload)
+    assert result is not None
+    assert result["is_error"] is True
+    assert result["original_fc"] == FUNC_WRITE_SINGLE
+    assert result["exception_code"] == EXCEPTION_ILLEGAL_FUNCTION
+
+
+# -- FC=0x10 write multiple registers (device data push) --
+
+def test_parse_mqtt_payload_fc10_data_push():
+    """Parse a FC=16 data push from device with start_addr and register data."""
+    register_data = bytearray(20)
+    struct.pack_into(">H", register_data, 0, 532)  # Some value
+    # Body: [start_addr(2)] [quantity(2)] [byte_count(1)] [data(N)]
+    body = bytearray()
+    body += struct.pack(">H", HOME_DATA)  # start_addr = 100
+    body += struct.pack(">H", 10)  # quantity = 10 registers
+    body.append(len(register_data))  # byte_count
+    body += register_data
+    frame = bytearray([0x01, FUNC_WRITE_MULTIPLE]) + body
+    frame += crc16_modbus(bytes(frame))
+    payload = bytes([0x01]) + bytes(frame)
+
+    result = parse_mqtt_payload(payload)
+    assert result is not None
+    assert result["function_code"] == FUNC_WRITE_MULTIPLE
+    assert result["start_addr"] == HOME_DATA
+    assert result["quantity"] == 10
+    assert result["byte_count"] == 20
+    assert len(result["register_data"]) == 20
+    assert "is_error" not in result
+
+
+def test_parse_mqtt_payload_fc10_pack_main_info():
+    """Parse a FC=16 push for PackMainInfo register range."""
+    register_data = bytearray(68)
+    body = bytearray()
+    body += struct.pack(">H", PACK_MAIN_INFO)  # start_addr = 6000
+    body += struct.pack(">H", 34)  # quantity
+    body.append(len(register_data))
+    body += register_data
+    frame = bytearray([0x01, FUNC_WRITE_MULTIPLE]) + body
+    frame += crc16_modbus(bytes(frame))
+    payload = bytes([0x01]) + bytes(frame)
+
+    result = parse_mqtt_payload(payload)
+    assert result is not None
+    assert result["start_addr"] == PACK_MAIN_INFO
+    assert result["quantity"] == 34
 
 
 # -- HomeData register map --

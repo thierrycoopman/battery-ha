@@ -27,7 +27,10 @@ from .api.client import BluettiCloudApi, BluettiCloudApiError
 from .api.modbus import (
     AC_SWITCH,
     DC_SWITCH,
+    EXCEPTION_ILLEGAL_DATA_ADDRESS,
+    FUNC_ERROR_MASK,
     FUNC_READ_HOLDING,
+    FUNC_WRITE_MULTIPLE,
     FUNC_WRITE_SINGLE,
     HOME_DATA,
     HOME_DATA_COUNT,
@@ -190,6 +193,9 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._pack_counts: dict[str, int] = {}
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
+        # Registers that returned Modbus errors — skip in future polls
+        # Key: sn, Value: set of (register, slave_addr) tuples
+        self._unsupported_registers: dict[str, set[tuple[int, int]]] = {}
 
     @property
     def client(self) -> BluettiCloudApi:
@@ -347,6 +353,11 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if not self._mqtt_client or not self._mqtt_client.is_connected:
             return
 
+        # Skip registers that previously returned Modbus errors
+        unsupported = self._unsupported_registers.get(sn, set())
+        if (register, slave_addr) in unsupported:
+            return
+
         # Set up pending request tracking
         self._pending_request = (register, slave_addr)
         self._response_event.clear()
@@ -388,8 +399,12 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         fc = parsed.get("function_code")
 
-        if fc == FUNC_READ_HOLDING:
+        if parsed.get("is_error"):
+            self._handle_error_response(sn, parsed)
+        elif fc == FUNC_READ_HOLDING:
             self._handle_telemetry_data(sn, parsed)
+        elif fc == FUNC_WRITE_MULTIPLE:
+            self._handle_write_multiple_data(sn, parsed)
         elif fc == FUNC_WRITE_SINGLE:
             self._handle_write_echo(sn, parsed)
 
@@ -408,16 +423,87 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             register = HOME_DATA
             slave_addr = 1
 
+        self._route_register_data(sn, register, slave_addr, register_data)
+
+        # Signal the polling loop that a response arrived
+        self._response_data = register_data
+        self._response_event.set()
+
+    def _handle_write_multiple_data(self, sn: str, parsed: dict) -> None:
+        """Process FC=0x10 data push from device.
+
+        Bluetti devices push telemetry using the FC=16 (Write Multiple Registers)
+        frame format, which includes start_addr — allowing us to route to the
+        correct parser without relying on pending request tracking.
+
+        Only signals the response event if start_addr matches the pending
+        request's register, to avoid unsolicited pushes (at unrelated
+        start_addrs) from prematurely unblocking the polling loop.
+        """
+        register_data = parsed.get("register_data", b"")
+        start_addr = parsed.get("start_addr")
+        if not register_data or start_addr is None:
+            return
+
+        _LOGGER.debug(
+            "MQTT FC=16 data for %s: start_addr=%d, %d bytes",
+            sn, start_addr, len(register_data),
+        )
+
+        # Determine slave_addr from pending request if available
+        slave_addr = 1
+        pending = self._pending_request
+        if pending is not None:
+            slave_addr = pending[1]
+
+        self._route_register_data(sn, start_addr, slave_addr, register_data)
+
+        # Only signal response event if this matches the pending request
+        if pending is not None and start_addr == pending[0]:
+            self._response_data = register_data
+            self._response_event.set()
+
+    def _handle_error_response(self, sn: str, parsed: dict) -> None:
+        """Process Modbus error response (FC with bit 7 set, e.g. 0x83).
+
+        Logs the error, records the register as unsupported to skip future
+        polls, and signals the response event so the polling loop doesn't timeout.
+        """
+        exception_code = parsed.get("exception_code", 0)
+        original_fc = parsed.get("original_fc", 0)
+        pending = self._pending_request
+
+        if pending is not None:
+            register, slave_addr = pending
+            _LOGGER.debug(
+                "MQTT error for %s: FC=0x%02X reg=%d slave=%d exception=0x%02X "
+                "(%s) — marking as unsupported",
+                sn, original_fc, register, slave_addr, exception_code,
+                "illegal data address" if exception_code == EXCEPTION_ILLEGAL_DATA_ADDRESS
+                else f"code {exception_code}",
+            )
+            # Track this register as unsupported to skip in future polls
+            unsupported = self._unsupported_registers.setdefault(sn, set())
+            unsupported.add((register, slave_addr))
+        else:
+            _LOGGER.debug(
+                "MQTT error for %s (no pending request): FC=0x%02X exception=0x%02X",
+                sn, original_fc, exception_code,
+            )
+
+        # Signal the polling loop so it doesn't waste time on timeout
+        self._response_event.set()
+
+    def _route_register_data(
+        self, sn: str, register: int, slave_addr: int, register_data: bytes
+    ) -> None:
+        """Route register data to the appropriate parser based on register address."""
         if register == HOME_DATA:
             self._process_home_data(sn, register_data)
         elif register == PACK_MAIN_INFO:
             self._process_pack_main_info(sn, register_data)
         elif register == PACK_ITEM_INFO:
             self._process_pack_item_info(sn, register_data, slave_addr)
-
-        # Signal the polling loop that a response arrived
-        self._response_data = register_data
-        self._response_event.set()
 
     def _process_home_data(self, sn: str, register_data: bytes) -> None:
         """Parse and store homeData fields."""

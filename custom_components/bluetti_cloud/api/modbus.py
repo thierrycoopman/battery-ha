@@ -36,6 +36,13 @@ PACK_ITEM_INFO_COUNT = 90    # 180 bytes
 # Modbus function codes
 FUNC_READ_HOLDING = 0x03
 FUNC_WRITE_SINGLE = 0x06
+FUNC_WRITE_MULTIPLE = 0x10
+FUNC_ERROR_MASK = 0x80  # Error responses have bit 7 set (e.g., 0x83 = error for 0x03)
+
+# Modbus exception codes (in error responses)
+EXCEPTION_ILLEGAL_FUNCTION = 0x01
+EXCEPTION_ILLEGAL_DATA_ADDRESS = 0x02
+EXCEPTION_ILLEGAL_DATA_VALUE = 0x03
 
 # Default slave address (0 for 2nd gen IoT, 1 for older)
 DEFAULT_SLAVE_ADDR = 1
@@ -195,7 +202,14 @@ def parse_mqtt_payload(payload: bytes) -> dict[str, Any] | None:
         "function_code": fc,
     }
 
-    if fc == FUNC_READ_HOLDING and len(body) >= 1:
+    if fc & FUNC_ERROR_MASK:
+        # Error response: [exception_code(1)]
+        # FC=0x83 = error for FC=0x03, FC=0x86 = error for FC=0x06, etc.
+        result["is_error"] = True
+        result["original_fc"] = fc & ~FUNC_ERROR_MASK
+        result["exception_code"] = body[0] if body else 0
+        result["data"] = body
+    elif fc == FUNC_READ_HOLDING and len(body) >= 1:
         # FC=03 response: [byte_count(1)] [register_data(N)]
         byte_count = body[0]
         register_data = body[1 : 1 + byte_count]
@@ -209,6 +223,19 @@ def parse_mqtt_payload(payload: bytes) -> dict[str, Any] | None:
         result["register_addr"] = reg_addr
         result["value"] = value
         result["data"] = body
+    elif fc == FUNC_WRITE_MULTIPLE and len(body) >= 5:
+        # FC=10 data push from device (non-standard Modbus usage by Bluetti):
+        # [start_addr(2)] [quantity(2)] [byte_count(1)] [register_data(N)]
+        # The device "writes" its state using the FC=16 request format.
+        start_addr = (body[0] << 8) | body[1]
+        quantity = (body[2] << 8) | body[3]
+        byte_count = body[4]
+        register_data = body[5 : 5 + byte_count]
+        result["start_addr"] = start_addr
+        result["quantity"] = quantity
+        result["byte_count"] = byte_count
+        result["register_data"] = register_data
+        result["data"] = register_data
     else:
         result["data"] = body
 
