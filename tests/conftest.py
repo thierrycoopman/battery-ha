@@ -36,6 +36,7 @@ def sample_devices_response():
         "data": [
             {
                 "sn": "AC300FAKESERIAL001",
+                "subSn": "FAKESERIAL001",
                 "name": "Winenne",
                 "model": "AC300",
                 "sessionState": "Online",
@@ -52,10 +53,12 @@ def sample_devices_response():
                     "powerDcOut": "0",
                     "acSwitch": "0",
                     "dcSwitch": "1",
+                    "iotSession": "Online",
                 },
             },
             {
                 "sn": "AC200FAKESERIAL002",
+                "subSn": "FAKESERIAL002",
                 "name": "Backup",
                 "model": "AC200",
                 "sessionState": "Offline",
@@ -80,8 +83,27 @@ def sample_last_alive_response():
             "powerGridIn": "0",
             "powerAcOut": "200",
             "powerDcOut": "50",
+            "powerFeedBack": "0",
             "acSwitch": "1",
             "dcSwitch": "0",
+            "pvSwitch": "0",
+            "gridSwitch": "0",
+            "iotSession": "Online",
+        },
+    }
+
+
+@pytest.fixture
+def sample_energy_response():
+    """getDeviceEnergyDetail endpoint response."""
+    return {
+        "msgCode": 0,
+        "message": "OK",
+        "data": {
+            "day": 3.5,
+            "month": 45.2,
+            "year": 320.0,
+            "total": 1234.5,
         },
     }
 

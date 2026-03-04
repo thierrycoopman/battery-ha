@@ -1,0 +1,50 @@
+# Development artifacts — NOT part of the integration
+_reference/
+_apk/
+app/
+docs/
+venv/
+.claude/
+.playwright-mcp/
+
+# Extracted certificates (from APK reverse engineering)
+ca_*.crt
+
+# Explorer / research artifacts
+openapi_bluetti.yaml
+bluetti_openapi_official.yaml
+explorer-screenshot.png
+official-api-tab.png
+requirements.txt
+
+.gitignore
+
+# Sensitive documentation
+REVERSE_ENGINEERING.md
+
+# Test scripts with hardcoded credentials at repo root (use env vars for real tests)
+/test_*.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

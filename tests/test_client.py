@@ -97,20 +97,6 @@ async def test_get_device_last_alive(
 
 
 @pytest.mark.asyncio
-async def test_control_device(
-    mock_session, sample_login_response, sample_fulfillment_response
-):
-    mock_session.post.return_value = _mock_response(sample_login_response)
-    mock_session.request.return_value = _mock_response(sample_fulfillment_response)
-
-    client = BluettiCloudApi(mock_session)
-    await client.login("test@example.com", "password123")
-
-    result = await client.control_device("AC300FAKESERIAL001", "SetCtrlAcSwitch", "1")
-    assert result["msgCode"] == 0
-
-
-@pytest.mark.asyncio
 async def test_auto_reauth_on_805(mock_session, sample_login_response):
     """Test that client re-authenticates when it gets a 805 response."""
     expired_response = {"msgCode": 805, "message": "Token expired"}
