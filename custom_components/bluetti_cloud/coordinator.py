@@ -200,7 +200,7 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         # Which pack IDs have been seen with real data (non-zero voltage/SOC)
         self._discovered_packs: dict[str, set[int]] = {}
         # Devices that send FC=16 data pushes (V1 protocol) — skip homeData/FC=03
-        self._fc16_devices: set[str] = {}
+        self._fc16_devices: set[str] = set()
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
         # Registers that returned Modbus errors — skip in future polls
