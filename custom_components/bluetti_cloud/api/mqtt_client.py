@@ -384,12 +384,17 @@ class BluettiMqttClient:
         )
         self._client.username_pw_set(prep["mqtt_user"], mqtt_pass)
 
-        # Use paho's tls_set() — simpler and more robust than manual SSLContext
-        self._client.tls_set(
-            certfile=self._pem_cert,
-            keyfile=self._pem_key,
-            cert_reqs=ssl.CERT_NONE,
-        )
+        # mTLS context: Bluetti broker uses small keys (< 2048-bit) that
+        # OpenSSL 3.x rejects at default security level. @SECLEVEL=0 allows them.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+        except ssl.SSLError:
+            pass
+        ctx.load_cert_chain(self._pem_cert, self._pem_key)
+        self._client.tls_set_context(ctx)
         self._client.tls_insecure_set(True)
 
         self._client.on_connect = self._on_connect
