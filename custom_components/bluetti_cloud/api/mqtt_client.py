@@ -312,6 +312,13 @@ class BluettiMqttClient:
             f"BLUETTI_HA&{uuid.uuid4()}&{int(time.time() * 1000)}".encode()
         ).hexdigest()
 
+        _LOGGER.debug(
+            "MQTT credentials: user=%s, pass=%s (len=%d), server_time=%d, "
+            "token_parts=%d, part0_len=%d, part1_len=%d",
+            mqtt_user[:30], mqtt_pass, len(mqtt_pass), utc_time,
+            len(parts), len(parts[0]), len(parts[1]),
+        )
+
         return {
             "mqtt_user": mqtt_user,
             "mqtt_pass": mqtt_pass,
@@ -370,15 +377,30 @@ class BluettiMqttClient:
         try:
             self._client.connect(MQTT_BROKER, MQTT_PORT, keepalive=MQTT_KEEPALIVE)
             self._client.loop_start()
+            _LOGGER.debug("MQTT connect() + loop_start() completed, waiting for CONNACK...")
         except Exception as err:
             raise BluettiMqttError(f"MQTT connection failed: {err}") from err
 
         # Poll for connection (blocking — safe in executor thread)
         deadline = time.time() + MQTT_CONNECT_TIMEOUT
+        poll_count = 0
         while not self._connected and not self._connect_error and time.time() < deadline:
             time.sleep(0.2)
+            poll_count += 1
+            if poll_count % 25 == 0:  # every 5 seconds
+                _LOGGER.debug(
+                    "Still waiting for CONNACK... (%.1fs elapsed, connected=%s, error=%s)",
+                    MQTT_CONNECT_TIMEOUT - (deadline - time.time()),
+                    self._connected, self._connect_error,
+                )
 
         if not self._connected:
+            _LOGGER.error(
+                "MQTT connection timed out after %ds: connected=%s, error=%s, "
+                "socket=%s",
+                MQTT_CONNECT_TIMEOUT, self._connected, self._connect_error,
+                self._client.socket() if self._client else "no client",
+            )
             self._client.loop_stop()
             raise BluettiMqttError(
                 f"MQTT connection failed: {self._connect_error or 'timeout'}"
@@ -466,16 +488,23 @@ class BluettiMqttClient:
     # -- paho-mqtt callbacks (run in paho's network thread) --
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
-        if reason_code == 0:
-            _LOGGER.debug("MQTT connected")
-            self._connected = True
-            # (Re-)subscribe to all tracked topics on connect/reconnect
-            for topic in self._subscriptions:
-                client.subscribe(topic, qos=1)
-                _LOGGER.debug("(Re-)subscribed to %s", topic)
-        else:
-            _LOGGER.error("MQTT connect failed: %s", reason_code)
-            self._connect_error = str(reason_code)
+        try:
+            _LOGGER.debug(
+                "MQTT on_connect: reason_code=%r (type=%s), flags=%r",
+                reason_code, type(reason_code).__name__, flags,
+            )
+            if reason_code == 0 or str(reason_code) == "Success":
+                _LOGGER.info("MQTT connected successfully")
+                self._connected = True
+                # (Re-)subscribe to all tracked topics on connect/reconnect
+                for topic in self._subscriptions:
+                    client.subscribe(topic, qos=1)
+                    _LOGGER.debug("(Re-)subscribed to %s", topic)
+            else:
+                _LOGGER.error("MQTT connect rejected: %r", reason_code)
+                self._connect_error = str(reason_code)
+        except Exception:
+            _LOGGER.exception("Exception in _on_connect callback")
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         _LOGGER.debug("MQTT disconnected: %s (was_connected=%s)", reason_code, self._connected)
