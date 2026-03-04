@@ -331,7 +331,12 @@ class BluettiMqttClient:
         if not self._pem_cert or not self._pem_key:
             raise BluettiMqttError("No PEM certificate files available")
 
-        # TLS context with client certificate
+        # Log cert details for diagnostics
+        cert_size = os.path.getsize(self._pem_cert) if os.path.exists(self._pem_cert) else 0
+        key_size = os.path.getsize(self._pem_key) if os.path.exists(self._pem_key) else 0
+        _LOGGER.debug("PEM cert: %d bytes, PEM key: %d bytes", cert_size, key_size)
+
+        # TLS context with client certificate (mTLS)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -351,11 +356,16 @@ class BluettiMqttClient:
         )
         self._client.username_pw_set(prep["mqtt_user"], prep["mqtt_pass"])
         self._client.tls_set_context(ctx)
+        self._client.tls_insecure_set(True)
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
+        self._client.enable_logger(_LOGGER)  # paho internal debug logs
 
-        _LOGGER.debug("Connecting to MQTT broker %s:%d", MQTT_BROKER, MQTT_PORT)
+        _LOGGER.debug(
+            "Connecting to MQTT broker %s:%d (user=%s, client_id=%s)",
+            MQTT_BROKER, MQTT_PORT, prep["mqtt_user"][:20] + "...", prep["client_id"],
+        )
 
         try:
             self._client.connect(MQTT_BROKER, MQTT_PORT, keepalive=MQTT_KEEPALIVE)
@@ -468,7 +478,10 @@ class BluettiMqttClient:
             self._connect_error = str(reason_code)
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
-        _LOGGER.debug("MQTT disconnected: %s", reason_code)
+        _LOGGER.debug("MQTT disconnected: %s (was_connected=%s)", reason_code, self._connected)
+        if not self._connected:
+            # Disconnected before ever connecting — TLS or auth failure
+            self._connect_error = f"Connection rejected: {reason_code}"
         self._connected = False
 
     def _on_message(self, client, userdata, message):
