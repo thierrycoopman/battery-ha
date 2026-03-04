@@ -1,5 +1,7 @@
 """Base entity for Bluetti Cloud integration."""
 
+from typing import Any
+
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -22,16 +24,22 @@ class BluettiCloudEntity(CoordinatorEntity[BluettiCloudCoordinator]):
         self._device_sn = device_sn
         self._attr_unique_id = f"{device_sn}_{key}"
 
-        device_data = coordinator.data.get(device_sn, {})
+        # Build device info from whatever we have at init time.
+        # The coordinator may not have data yet during first setup,
+        # so use device_info from config as fallback.
+        device_data = (coordinator.data or {}).get(device_sn, {})
+        info = coordinator._device_info.get(device_sn, {})
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_sn)},
-            name=device_data.get("device_name", device_sn),
+            name=device_data.get("device_name") or info.get("name", device_sn),
             manufacturer="Bluetti",
-            model=device_data.get("device_type", ""),
+            model=device_data.get("device_type") or info.get("model", ""),
+            serial_number=device_sn,
         )
 
     @property
-    def device_data(self) -> dict:
+    def device_data(self) -> dict[str, Any]:
         """Return the coordinator data for this device."""
         if self.coordinator.data is None:
             return {}
@@ -39,5 +47,14 @@ class BluettiCloudEntity(CoordinatorEntity[BluettiCloudCoordinator]):
 
     @property
     def available(self) -> bool:
-        """Return True if coordinator has data and device entry exists."""
-        return super().available and self._device_sn in (self.coordinator.data or {})
+        """Return True if coordinator has run and device has data.
+
+        We do NOT require the device to be "online" — cloud data may be
+        slightly stale but still valid. Sensors should show last known values
+        rather than going unavailable.
+        """
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self._device_sn in self.coordinator.data
+        )

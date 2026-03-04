@@ -46,15 +46,7 @@ class BluettiCloudApi:
         return headers
 
     async def login(self, username: str, password: str) -> None:
-        """Authenticate with Bluetti Cloud.
-
-        Args:
-            username: Bluetti account email.
-            password: Plaintext password (will be transformed).
-
-        Raises:
-            AuthenticationError: If login fails.
-        """
+        """Authenticate with Bluetti Cloud."""
         self._username = username
         self._password = password
 
@@ -141,7 +133,6 @@ class BluettiCloudApi:
 
         msg_code = result.get("msgCode", result.get("code", -1))
         if msg_code == 805:
-            # Token expired — re-authenticate and retry once
             _LOGGER.debug("Token expired (805), re-authenticating")
             await self.login(self._username, self._password)
             headers = self._headers()
@@ -159,12 +150,7 @@ class BluettiCloudApi:
         return result
 
     async def get_devices(self) -> list[dict[str, Any]]:
-        """Fetch all devices with embedded telemetry.
-
-        Returns list of device dicts from the homeDevices endpoint.
-        The API returns a flat list of devices in data[].
-        Each device has fields: sn, name, model, sessionState, lastAlive, etc.
-        """
+        """Fetch all devices with embedded telemetry."""
         result = await self._request(
             "GET",
             "/api/blusmartprod/device/group/v1/homeDevices",
@@ -177,35 +163,48 @@ class BluettiCloudApi:
     async def get_device_last_alive(self, device_sn: str) -> dict[str, Any]:
         """Fetch detailed live telemetry for a device.
 
-        Args:
-            device_sn: Device serial number.
-
-        Returns:
-            Dict of telemetry data.
+        Returns data even for devices with iotSession=Offline, as long as
+        the cloud has recent data from the device.
         """
         result = await self._request(
             "POST",
             "/api/bluiotdata/realtime/v1/getDeviceLastAlive",
             json_data={"deviceSn": device_sn},
         )
-        return result.get("data", {})
+        return result.get("data") or {}
 
-    async def control_device(
-        self, sn: str, fn_code: str, fn_value: str
-    ) -> dict[str, Any]:
-        """Send a control command to a device.
-
-        Args:
-            sn: Device serial number.
-            fn_code: Function code (e.g., 'SetCtrlAcSwitch').
-            fn_value: Value to set ('0' or '1').
+    async def get_energy_detail(self, device_sn: str) -> dict[str, Any]:
+        """Fetch energy totals (day/month/year/lifetime kWh).
 
         Returns:
-            API response dict.
+            Dict with keys: day, month, year, total (all float kWh).
         """
         result = await self._request(
             "POST",
-            "/api/bluiotdata/ha/v1/fulfillment",
-            json_data={"sn": sn, "fnCode": fn_code, "fnValue": fn_value},
+            "/api/bluiotdata/dashboard/v1/getDeviceEnergyDetail",
+            json_data={"deviceSn": device_sn},
         )
-        return result
+        return result.get("data") or {}
+
+    async def get_power_statistics(
+        self, device_sn: str, date: str
+    ) -> dict[str, Any]:
+        """Fetch power time series for a day.
+
+        Args:
+            device_sn: Device serial number.
+            date: Date in YYYY-MM-DD format.
+
+        Returns:
+            Dict with chart_x_smart (time labels) and chart_y (series list).
+        """
+        result = await self._request(
+            "POST",
+            "/api/bluiotdata/dashboard/v2/getDevicePowerStatistics",
+            json_data={
+                "deviceSn": device_sn,
+                "startDate": date,
+                "queryType": 1,
+            },
+        )
+        return result.get("data") or {}

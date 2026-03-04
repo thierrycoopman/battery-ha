@@ -14,12 +14,26 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 
 ## Features
 
-- **Battery monitoring** — State of Charge (SoC), total battery percentage
-- **Power monitoring** — PV input, grid input, AC output, DC output (in Watts)
+- **Real-time MQTT telemetry** — Battery SOC, pack voltage/current, charging status updated in ~1 second via MQTT push
+- **REST API fallback** — Power readings, energy totals, and online status polled every 60s (30s if MQTT unavailable)
+- **AC/DC control** — Switch entities to toggle AC and DC outputs via MQTT with optimistic state updates
+- **Power monitoring** — PV input, grid input, AC output, DC output, grid feed-in (in Watts)
+- **Energy tracking** — Daily, monthly, yearly, and lifetime energy totals (kWh) for the HA Energy Dashboard
 - **Online status** — Binary sensor showing device connectivity
-- **AC/DC control** — Switch entities to toggle AC and DC outputs on/off
-- **30-second polling** — Automatic data refresh every 30 seconds
 - **Multi-device support** — Monitor and control multiple Bluetti devices
+- **Graceful degradation** — If MQTT is unavailable, the integration falls back to REST-only polling
+
+### Architecture
+
+```
+                          ┌──────────────┐
+  MQTT (real-time ~1s)    │              │    REST API (every 60s)
+  PUB/{model}/{subSn} ──> │  Coordinator  │ <── homeDevices + lastAlive + energyDetail
+  Modbus RTU frames       │              │
+                          └──────┬───────┘
+                                 │
+                    HA entity state updates
+```
 
 ## Supported Devices
 
@@ -71,14 +85,23 @@ Or manually:
 For each selected device, the following entities are created:
 
 ### Sensors
-| Entity | Description | Unit |
-|--------|-------------|------|
-| Battery | Battery state of charge | % |
-| Total Battery | Total battery percentage | % |
-| PV Input | Solar panel input power | W |
-| Grid Input | Grid/AC charging power | W |
-| AC Output | AC output power | W |
-| DC Output | DC output power | W |
+| Entity | Description | Unit | Source |
+|--------|-------------|------|--------|
+| Battery | Battery state of charge | % | MQTT / REST |
+| Pack Voltage | Battery pack voltage | V | MQTT |
+| Pack Current | Battery pack current (negative = discharging) | A | MQTT |
+| Charging Status | Current charging state (charging/discharging/standby) | — | MQTT |
+| Charge Time Remaining | Estimated time to full charge | min | MQTT |
+| Discharge Time Remaining | Estimated time to empty | min | MQTT |
+| Solar Power | PV input power | W | REST |
+| Grid Input Power | Grid/AC charging power | W | REST |
+| AC Output Power | AC output power | W | REST |
+| DC Output Power | DC output power | W | REST |
+| Grid Feed-in Power | Power fed back to grid | W | REST |
+| Energy Today | Energy generated today | kWh | REST |
+| Energy This Month | Energy generated this month | kWh | REST |
+| Energy This Year | Energy generated this year | kWh | REST |
+| Lifetime Energy | Total lifetime energy | kWh | REST |
 
 ### Binary Sensors
 | Entity | Description |
@@ -88,8 +111,20 @@ For each selected device, the following entities are created:
 ### Switches
 | Entity | Description |
 |--------|-------------|
-| AC Output | Toggle AC output on/off |
-| DC Output | Toggle DC output on/off |
+| AC Output | Toggle AC output on/off (via MQTT) |
+| DC Output | Toggle DC output on/off (via MQTT) |
+
+## How It Works
+
+The integration uses a **hybrid MQTT + REST** architecture:
+
+1. **MQTT (primary)** — Connects to `iot.bluettipower.com:18760` using mTLS client certificates and TOTP authentication. Receives real-time Modbus RTU telemetry frames with battery, pack, and switch state data. Also sends switch commands.
+
+2. **REST API (complementary)** — Polls the Bluetti mobile app API every 60 seconds for power readings, energy totals, and online status. These fields are not available via MQTT on older devices (protocolVer < 2001).
+
+3. **Data merge** — MQTT data takes precedence for fields it provides (more current). REST fills in fields MQTT cannot provide.
+
+4. **Fallback** — If MQTT cannot connect (e.g., certificate issues), the integration automatically falls back to REST-only mode with 30-second polling.
 
 ## Troubleshooting
 
@@ -99,28 +134,31 @@ Ensure you're using the same credentials as the Bluetti mobile app. The password
 ### "Cannot connect to Bluetti Cloud"
 Check your internet connection. The Bluetti cloud servers may occasionally be unreachable.
 
-### Switches not working
-The AC/DC switch control uses the HA fulfillment API endpoint. If your device model doesn't support this endpoint, the switches will appear as unavailable.
+### MQTT sensors show "unavailable"
+MQTT telemetry sensors (Pack Voltage, Pack Current, Charging Status, etc.) require an active MQTT connection. Check your HA logs for MQTT connection errors. The integration will fall back to REST polling for non-MQTT sensors.
+
+### Switches not responding
+Switch control requires MQTT connectivity. If MQTT cannot connect, switches will not work. Check the HA log for `"MQTT telemetry unavailable"` messages. Common causes:
+- `pycryptodome` not installed (required for mTLS certificate exchange)
+- Network firewall blocking port 18760 to `iot.bluettipower.com`
+- Bluetti token expired (restart the integration)
 
 ### Device shows as offline
-If the device shows as offline in this integration but online in the mobile app, please open an issue with your device model.
+If the device shows as offline in this integration but online in the mobile app, this is expected for some device models. The `iotSession` field may report "Offline" even when the device is controllable. MQTT control and telemetry can still work in this state.
 
 ## Development
 
 ```bash
 # Clone the repo
 git clone https://github.com/thierrycoopman/battery-ha.git
-cd bluetti-ha
+cd battery-ha
 
 # Create virtual environment
 python -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install pytest pytest-asyncio aiohttp pycryptodome homeassistant voluptuous
-
-# Run tests
-python -m pytest tests/ -v
+pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous
 ```
 
 ## License

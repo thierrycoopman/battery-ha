@@ -11,7 +11,14 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfPower
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfEnergy,
+    UnitOfPower,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -28,31 +35,20 @@ class BluettiSensorDescription(SensorEntityDescription):
 
 
 SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
+    # Battery
     BluettiSensorDescription(
         key="battery_soc",
         data_key="battery_soc",
-        translation_key="battery_soc",
         name="Battery",
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
-        icon="mdi:battery",
     ),
-    BluettiSensorDescription(
-        key="total_battery_percent",
-        data_key="total_battery_percent",
-        translation_key="total_battery_percent",
-        name="Total Battery",
-        device_class=SensorDeviceClass.BATTERY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=PERCENTAGE,
-        icon="mdi:battery",
-    ),
+    # Power sensors
     BluettiSensorDescription(
         key="power_pv_in",
         data_key="power_pv_in",
-        translation_key="power_pv_in",
-        name="PV Input",
+        name="Solar Power",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -61,8 +57,7 @@ SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
     BluettiSensorDescription(
         key="power_grid_in",
         data_key="power_grid_in",
-        translation_key="power_grid_in",
-        name="Grid Input",
+        name="Grid Input Power",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -71,8 +66,7 @@ SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
     BluettiSensorDescription(
         key="power_ac_out",
         data_key="power_ac_out",
-        translation_key="power_ac_out",
-        name="AC Output",
+        name="AC Output Power",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -81,12 +75,100 @@ SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
     BluettiSensorDescription(
         key="power_dc_out",
         data_key="power_dc_out",
-        translation_key="power_dc_out",
-        name="DC Output",
+        name="DC Output Power",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
         icon="mdi:current-dc",
+    ),
+    BluettiSensorDescription(
+        key="power_feed_back",
+        data_key="power_feed_back",
+        name="Grid Feed-in Power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        icon="mdi:transmission-tower-export",
+    ),
+    # MQTT-sourced sensors (real-time from device telemetry)
+    BluettiSensorDescription(
+        key="pack_voltage",
+        data_key="pack_voltage",
+        name="Pack Voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        icon="mdi:flash",
+    ),
+    BluettiSensorDescription(
+        key="pack_current",
+        data_key="pack_current",
+        name="Pack Current",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        icon="mdi:current-ac",
+    ),
+    BluettiSensorDescription(
+        key="charge_time_remaining",
+        data_key="charge_time_remaining",
+        name="Charge Time Remaining",
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        icon="mdi:battery-charging",
+    ),
+    BluettiSensorDescription(
+        key="discharge_time_remaining",
+        data_key="discharge_time_remaining",
+        name="Discharge Time Remaining",
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        icon="mdi:battery-outline",
+    ),
+    BluettiSensorDescription(
+        key="charging_status",
+        data_key="charging_status",
+        name="Charging Status",
+        icon="mdi:battery-sync",
+    ),
+    # Energy sensors (for HA Energy Dashboard)
+    BluettiSensorDescription(
+        key="energy_day",
+        data_key="energy_day",
+        name="Energy Today",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        icon="mdi:solar-power-variant",
+    ),
+    BluettiSensorDescription(
+        key="energy_month",
+        data_key="energy_month",
+        name="Energy This Month",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        icon="mdi:calendar-month",
+    ),
+    BluettiSensorDescription(
+        key="energy_year",
+        data_key="energy_year",
+        name="Energy This Year",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        icon="mdi:calendar",
+    ),
+    BluettiSensorDescription(
+        key="energy_total",
+        data_key="energy_total",
+        name="Lifetime Energy",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        icon="mdi:lightning-bolt",
     ),
 ]
 
@@ -122,5 +204,5 @@ class BluettiCloudSensor(BluettiCloudEntity, SensorEntity):
         self.entity_description = description
 
     @property
-    def native_value(self) -> int | float | None:
+    def native_value(self) -> int | float | str | None:
         return self.device_data.get(self.entity_description.data_key)
