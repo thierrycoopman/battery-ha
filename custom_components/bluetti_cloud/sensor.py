@@ -18,8 +18,6 @@ from homeassistant.const import (
     UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
-    UnitOfTemperature,
-    UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -96,42 +94,6 @@ SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
     ),
     # MQTT-sourced sensors (real-time from device telemetry)
     BluettiSensorDescription(
-        key="pack_voltage",
-        data_key="pack_voltage",
-        name="Pack Voltage",
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        icon="mdi:flash",
-    ),
-    BluettiSensorDescription(
-        key="pack_current",
-        data_key="pack_current",
-        name="Pack Current",
-        device_class=SensorDeviceClass.CURRENT,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
-        icon="mdi:current-ac",
-    ),
-    BluettiSensorDescription(
-        key="charge_time_remaining",
-        data_key="charge_time_remaining",
-        name="Charge Time Remaining",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        icon="mdi:battery-charging",
-    ),
-    BluettiSensorDescription(
-        key="discharge_time_remaining",
-        data_key="discharge_time_remaining",
-        name="Discharge Time Remaining",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        icon="mdi:battery-outline",
-    ),
-    BluettiSensorDescription(
         key="charging_status",
         data_key="charging_status",
         name="Charging Status",
@@ -176,7 +138,7 @@ SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
     ),
 ]
 
-# PackMainInfo summary sensors (from active MQTT polling, reg 6000)
+# Battery aggregate sensors (from FC=16 registers 92-93 and reg 43)
 PACK_SUMMARY_DESCRIPTIONS: list[BluettiSensorDescription] = [
     BluettiSensorDescription(
         key="pack_total_voltage",
@@ -196,55 +158,15 @@ PACK_SUMMARY_DESCRIPTIONS: list[BluettiSensorDescription] = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         icon="mdi:current-ac",
     ),
-    BluettiSensorDescription(
-        key="pack_total_soc",
-        data_key="pack_total_soc",
-        name="Battery Total SOC",
-        device_class=SensorDeviceClass.BATTERY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=PERCENTAGE,
-        icon="mdi:battery",
-    ),
-    BluettiSensorDescription(
-        key="pack_total_soh",
-        data_key="pack_total_soh",
-        name="Battery Health",
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=PERCENTAGE,
-        icon="mdi:battery-heart-variant",
-    ),
-    BluettiSensorDescription(
-        key="pack_average_temp",
-        data_key="pack_average_temp",
-        name="Battery Temperature",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        icon="mdi:thermometer",
-    ),
-    BluettiSensorDescription(
-        key="charge_full_time",
-        data_key="charge_full_time",
-        name="Time to Full Charge",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        icon="mdi:battery-clock",
-    ),
-    BluettiSensorDescription(
-        key="discharge_empty_time",
-        data_key="discharge_empty_time",
-        name="Time to Empty",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        icon="mdi:battery-clock-outline",
-    ),
 ]
 
 
 def _build_pack_descriptions(pack_id: int) -> list[BluettiSensorDescription]:
-    """Build sensor descriptions for a specific battery pack."""
+    """Build sensor descriptions for a specific battery pack.
+
+    AC300 provides per-pack voltage (reg 98) and SOC (reg 99) via FC=16
+    register cycling, plus charging status from reg 97.
+    """
     prefix = f"pack_{pack_id}"
     label = f"Pack {pack_id}"
     return [
@@ -258,15 +180,6 @@ def _build_pack_descriptions(pack_id: int) -> list[BluettiSensorDescription]:
             icon="mdi:flash",
         ),
         BluettiSensorDescription(
-            key=f"{prefix}_current",
-            data_key=f"{prefix}_current",
-            name=f"{label} Current",
-            device_class=SensorDeviceClass.CURRENT,
-            state_class=SensorStateClass.MEASUREMENT,
-            native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
-            icon="mdi:current-ac",
-        ),
-        BluettiSensorDescription(
             key=f"{prefix}_soc",
             data_key=f"{prefix}_soc",
             name=f"{label} SOC",
@@ -274,23 +187,6 @@ def _build_pack_descriptions(pack_id: int) -> list[BluettiSensorDescription]:
             state_class=SensorStateClass.MEASUREMENT,
             native_unit_of_measurement=PERCENTAGE,
             icon="mdi:battery",
-        ),
-        BluettiSensorDescription(
-            key=f"{prefix}_soh",
-            data_key=f"{prefix}_soh",
-            name=f"{label} Health",
-            state_class=SensorStateClass.MEASUREMENT,
-            native_unit_of_measurement=PERCENTAGE,
-            icon="mdi:battery-heart-variant",
-        ),
-        BluettiSensorDescription(
-            key=f"{prefix}_temp",
-            data_key=f"{prefix}_temp",
-            name=f"{label} Temperature",
-            device_class=SensorDeviceClass.TEMPERATURE,
-            state_class=SensorStateClass.MEASUREMENT,
-            native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-            icon="mdi:thermometer",
         ),
         BluettiSensorDescription(
             key=f"{prefix}_charging_status",

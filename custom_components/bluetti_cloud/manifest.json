@@ -1,7 +1,7 @@
 {
   "domain": "bluetti_cloud",
   "name": "Bluetti Cloud",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "codeowners": ["@thierrycoopman"],
   "config_flow": true,
   "dependencies": [],

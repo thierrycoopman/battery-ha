@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from custom_components.bluetti_cloud.sensor import (
+    PACK_SUMMARY_DESCRIPTIONS,
     SENSOR_DESCRIPTIONS,
     BluettiCloudSensor,
 )
@@ -25,11 +26,7 @@ def coordinator_data():
             "device_type": "AC300",
             "sub_sn": "FAKESERIAL001",
             "battery_soc": 85,
-            "pack_voltage": 53.2,
-            "pack_current": -1.5,
             "charging_status": "discharging",
-            "charge_time_remaining": 0,
-            "discharge_time_remaining": 120,
             "pack_count": 1,
             "inverter_count": 1,
             "power_pv_in": 250,
@@ -47,6 +44,9 @@ def coordinator_data():
             "energy_total": 1234.5,
             "last_update": "2026-03-04 10:00:00",
             "mqtt_active": True,
+            # FC=16 aggregate battery data
+            "pack_total_voltage": 54.0,
+            "pack_total_current": 6.5,
         }
     }
 
@@ -76,20 +76,20 @@ def test_sensor_pv_input(mock_coordinator):
     assert sensor.native_value == 250
 
 
-def test_sensor_pack_voltage(mock_coordinator):
-    """Test MQTT-sourced pack voltage sensor."""
-    desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "pack_voltage")
+def test_sensor_battery_total_voltage(mock_coordinator):
+    """Test battery total voltage sensor (aggregate from FC=16 regs 92-93)."""
+    desc = next(d for d in PACK_SUMMARY_DESCRIPTIONS if d.key == "pack_total_voltage")
     sensor = BluettiCloudSensor(mock_coordinator, "AC300FAKESERIAL001", desc)
 
-    assert sensor.native_value == 53.2
+    assert sensor.native_value == 54.0
 
 
-def test_sensor_pack_current(mock_coordinator):
-    """Test MQTT-sourced pack current sensor (negative = discharging)."""
-    desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "pack_current")
+def test_sensor_battery_total_current(mock_coordinator):
+    """Test battery total current sensor (aggregate from FC=16 regs 92-93)."""
+    desc = next(d for d in PACK_SUMMARY_DESCRIPTIONS if d.key == "pack_total_current")
     sensor = BluettiCloudSensor(mock_coordinator, "AC300FAKESERIAL001", desc)
 
-    assert sensor.native_value == -1.5
+    assert sensor.native_value == 6.5
 
 
 def test_sensor_charging_status(mock_coordinator):
@@ -100,20 +100,14 @@ def test_sensor_charging_status(mock_coordinator):
     assert sensor.native_value == "discharging"
 
 
-def test_sensor_charge_time_remaining(mock_coordinator):
-    """Test charge time remaining sensor."""
-    desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "charge_time_remaining")
-    sensor = BluettiCloudSensor(mock_coordinator, "AC300FAKESERIAL001", desc)
-
-    assert sensor.native_value == 0
-
-
-def test_sensor_discharge_time_remaining(mock_coordinator):
-    """Test discharge time remaining sensor."""
-    desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "discharge_time_remaining")
-    sensor = BluettiCloudSensor(mock_coordinator, "AC300FAKESERIAL001", desc)
-
-    assert sensor.native_value == 120
+def test_sensor_pack_summary_no_soh_or_temp(mock_coordinator):
+    """Verify PACK_SUMMARY_DESCRIPTIONS does not include unavailable AC300 fields."""
+    keys = {d.key for d in PACK_SUMMARY_DESCRIPTIONS}
+    # SOH, temp, charge/discharge times are not available from AC300 FC=16
+    assert "pack_total_soh" not in keys
+    assert "pack_average_temp" not in keys
+    assert "charge_full_time" not in keys
+    assert "discharge_empty_time" not in keys
 
 
 def test_sensor_energy_day(mock_coordinator):

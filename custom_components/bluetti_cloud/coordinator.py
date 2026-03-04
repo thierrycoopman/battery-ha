@@ -199,6 +199,8 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._pack_slots: dict[str, int] = {}
         # Which pack IDs have been seen with real data (non-zero voltage/SOC)
         self._discovered_packs: dict[str, set[int]] = {}
+        # Devices that send FC=16 data pushes (V1 protocol) — skip homeData/FC=03
+        self._fc16_devices: set[str] = {}
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
         # Registers that returned Modbus errors — skip in future polls
@@ -324,17 +326,18 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     if not model or not sub_sn:
                         continue
 
-                    # 1. Read homeData (reg 100)
+                    # FC=16 devices (AC300, V1 protocol) push data automatically
+                    # via FC=16 frames — no need to send FC=03 read requests
+                    if sn in self._fc16_devices:
+                        continue
+
+                    # V2 devices need active polling via FC=03 reads
                     await self._poll_register(
                         sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT
                     )
-
-                    # 2. Read PackMainInfo (reg 6000)
                     await self._poll_register(
                         sn, model, sub_sn, PACK_MAIN_INFO, PACK_MAIN_INFO_COUNT
                     )
-
-                    # 3. Read PackItemInfo (reg 6100) for each known pack
                     pack_count = self._pack_counts.get(sn, 0)
                     for pack_idx in range(1, pack_count + 1):
                         await self._poll_register(
@@ -525,22 +528,24 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     def _process_home_data(self, sn: str, register_data: bytes) -> None:
         """Parse and store homeData fields.
 
-        Validates the parsed data before applying — the V2 homeData parser
-        produces garbage for V1 devices (AC300, protocolVer < 2001) because
-        register 100 has a different layout on those devices.
+        Skipped entirely for FC=16 devices (AC300, protocolVer < 2001) because
+        register 100 has a different layout — the V2 parser produces garbage
+        values (soc=36, charging_status=5760, charge_time=0, discharge_time=1).
         """
+        # FC=16 devices get their data from register pushes, not homeData
+        if sn in self._fc16_devices:
+            _LOGGER.debug("Skipping homeData for %s (FC=16 device)", sn)
+            return
+
         home_data = parse_home_data(register_data)
         if not home_data:
             return
 
-        # Validate: reject if charging_status is not a known code.
-        # V1 devices (AC300) return unrelated register data at address 100,
-        # which parse_home_data() misinterprets as charging_status=5760, soc=36, etc.
+        # Additional validation: reject if charging_status is not a known code
         raw_status = home_data.get("charging_status_raw")
         if raw_status is not None and raw_status > 10:
             _LOGGER.debug(
-                "Skipping homeData for %s: invalid charging_status_raw=%d "
-                "(likely wrong register layout for this device)",
+                "Skipping homeData for %s: invalid charging_status_raw=%d",
                 sn, raw_status,
             )
             return
@@ -663,13 +668,14 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if not fields:
             return
 
+        # Mark this device as FC=16 (V1 protocol) — skip homeData/FC=03 for it
+        self._fc16_devices.add(sn)
+
         mqtt_overlay = self._mqtt_data.setdefault(sn, {})
 
         # Map FC=16 field names to coordinator data keys
         _FC16_FIELD_MAP = {
             "total_battery_percent": "battery_soc",
-            "total_battery_voltage": "pack_voltage",
-            "total_battery_current": "pack_current",
             "dc_input_power": "power_pv_in",
             "ac_input_power": "power_grid_in",
             "ac_output_power": "power_ac_out",
