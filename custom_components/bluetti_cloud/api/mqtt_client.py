@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import socket
 import ssl
 import tempfile
 import time
@@ -38,8 +39,9 @@ _LOGGER = logging.getLogger(__name__)
 
 MQTT_BROKER = "iot.bluettipower.com"
 MQTT_PORT = 18760
-MQTT_KEEPALIVE = 20
-MQTT_CONNECT_TIMEOUT = 15
+MQTT_KEEPALIVE = 60
+MQTT_CONNECT_TIMEOUT = 20
+MQTT_TCP_TEST_TIMEOUT = 10
 
 # AES-ECB helpers for cert password exchange
 try:
@@ -277,10 +279,11 @@ class BluettiMqttClient:
         _LOGGER.debug("PEM certificate extracted successfully")
 
     async def async_prepare(self) -> dict:
-        """Async phase: download certificates + get TOTP (uses aiohttp on HA loop).
+        """Async phase: download certificates + get server time (runs on HA loop).
 
         Returns a dict with all data needed for the blocking connect phase.
-        Must be called from the HA event loop (where the aiohttp session lives).
+        TOTP generation is deferred to connect_blocking() to minimize time
+        between TOTP creation and MQTT CONNECT packet.
         """
         # Download certificates if needed
         if not self._pfx_data and (not self._pem_cert or not os.path.exists(self._pem_cert)):
@@ -301,58 +304,76 @@ class BluettiMqttClient:
             "Authorization": self._token,
         }
 
-        # Get fresh server time for TOTP
+        # Get fresh server time for TOTP (generated later in connect_blocking)
         utc_time, _ = await self._get_server_time(headers)
         if not utc_time:
             raise BluettiMqttError("Cannot get server time for MQTT TOTP")
 
         mqtt_user = f"tid:{parts[1]}"
-        mqtt_pass = generate_totp(parts[1], parts[0], utc_time)
         client_id = hashlib.md5(
             f"BLUETTI_HA&{uuid.uuid4()}&{int(time.time() * 1000)}".encode()
         ).hexdigest()
 
         _LOGGER.debug(
-            "MQTT credentials: user=%s, pass=%s (len=%d), server_time=%d, "
-            "token_parts=%d, part0_len=%d, part1_len=%d",
-            mqtt_user[:30], mqtt_pass, len(mqtt_pass), utc_time,
-            len(parts), len(parts[0]), len(parts[1]),
+            "MQTT prep: user=%s, server_time=%d, token_parts=%d",
+            mqtt_user[:30] + "...", utc_time, len(parts),
         )
 
         return {
             "mqtt_user": mqtt_user,
-            "mqtt_pass": mqtt_pass,
             "client_id": client_id,
+            "server_time": utc_time,
+            "token_part0": parts[0],
+            "token_part1": parts[1],
         }
 
     def connect_blocking(self, prep: dict) -> None:
-        """Blocking phase: extract PEM + TCP+TLS connect (runs in executor thread).
+        """Blocking phase: PEM extraction + TCP/TLS + MQTT connect (executor thread).
 
-        Takes the preparation dict from async_prepare(). This method does
-        file I/O and time.sleep() and must NOT be called from the event loop.
+        This method performs all blocking operations:
+        1. Extract PEM from P12 (file I/O)
+        2. Test raw TCP connectivity to broker
+        3. Generate TOTP password (time-sensitive — done right before connect)
+        4. Create paho client with TLS + mTLS client cert
+        5. Send CONNECT and manually process network loop until CONNACK
+        6. Start background loop for ongoing message processing
+
+        Must NOT be called from the event loop.
         """
-        # Extract PEM from P12 if we have raw data (first connect)
+        # Step 1: Extract PEM from P12 if we have raw data (first connect)
         if self._pfx_data:
             self._extract_and_write_pem()
 
         if not self._pem_cert or not self._pem_key:
             raise BluettiMqttError("No PEM certificate files available")
 
-        # Log cert details for diagnostics
         cert_size = os.path.getsize(self._pem_cert) if os.path.exists(self._pem_cert) else 0
         key_size = os.path.getsize(self._pem_key) if os.path.exists(self._pem_key) else 0
         _LOGGER.debug("PEM cert: %d bytes, PEM key: %d bytes", cert_size, key_size)
 
-        # TLS context with client certificate (mTLS)
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        # Step 2: Verify raw TCP connectivity to broker
+        _LOGGER.debug("Testing TCP connectivity to %s:%d", MQTT_BROKER, MQTT_PORT)
         try:
-            ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
-        except Exception:
-            pass
-        ctx.load_cert_chain(self._pem_cert, self._pem_key)
+            test_sock = socket.create_connection(
+                (MQTT_BROKER, MQTT_PORT), timeout=MQTT_TCP_TEST_TIMEOUT
+            )
+            test_sock.close()
+            _LOGGER.debug("TCP connectivity OK")
+        except OSError as err:
+            raise BluettiMqttError(
+                f"Cannot reach MQTT broker {MQTT_BROKER}:{MQTT_PORT}: {err}"
+            ) from err
 
+        # Step 3: Generate TOTP right before connect (minimizes time window)
+        mqtt_pass = generate_totp(
+            prep["token_part1"], prep["token_part0"], prep["server_time"]
+        )
+        _LOGGER.debug(
+            "MQTT TOTP: pass=%s (len=%d), server_time=%d",
+            mqtt_pass, len(mqtt_pass), prep["server_time"],
+        )
+
+        # Step 4: Create paho client with TLS
         self._connected = False
         self._connect_error = None
 
@@ -361,58 +382,75 @@ class BluettiMqttClient:
             client_id=prep["client_id"],
             protocol=mqtt.MQTTv311,
         )
-        self._client.username_pw_set(prep["mqtt_user"], prep["mqtt_pass"])
-        self._client.tls_set_context(ctx)
+        self._client.username_pw_set(prep["mqtt_user"], mqtt_pass)
+
+        # Use paho's tls_set() — simpler and more robust than manual SSLContext
+        self._client.tls_set(
+            certfile=self._pem_cert,
+            keyfile=self._pem_key,
+            cert_reqs=ssl.CERT_NONE,
+        )
         self._client.tls_insecure_set(True)
+
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
-        self._client.enable_logger(_LOGGER)  # paho internal debug logs
+        self._client.enable_logger(_LOGGER)
 
         _LOGGER.debug(
             "Connecting to MQTT broker %s:%d (user=%s, client_id=%s)",
-            MQTT_BROKER, MQTT_PORT, prep["mqtt_user"][:20] + "...", prep["client_id"],
+            MQTT_BROKER, MQTT_PORT, prep["mqtt_user"][:30] + "...", prep["client_id"],
         )
 
+        # Step 5: Connect and manually drive the network loop for CONNACK
+        # Using manual loop() instead of loop_start() eliminates threading
+        # issues during the critical connection phase. The CONNACK response
+        # is processed synchronously in this executor thread.
         try:
             self._client.connect(MQTT_BROKER, MQTT_PORT, keepalive=MQTT_KEEPALIVE)
-            self._client.loop_start()
-            _LOGGER.debug("MQTT connect() + loop_start() completed, waiting for CONNACK...")
         except Exception as err:
-            raise BluettiMqttError(f"MQTT connection failed: {err}") from err
+            raise BluettiMqttError(
+                f"MQTT connect failed (TCP/TLS): {err}"
+            ) from err
 
-        # Poll for connection (blocking — safe in executor thread)
+        _LOGGER.debug("CONNECT packet sent, processing network loop for CONNACK...")
+
         deadline = time.time() + MQTT_CONNECT_TIMEOUT
-        poll_count = 0
         while not self._connected and not self._connect_error and time.time() < deadline:
-            time.sleep(0.2)
-            poll_count += 1
-            if poll_count % 25 == 0:  # every 5 seconds
-                _LOGGER.debug(
-                    "Still waiting for CONNACK... (%.1fs elapsed, connected=%s, error=%s)",
-                    MQTT_CONNECT_TIMEOUT - (deadline - time.time()),
-                    self._connected, self._connect_error,
-                )
+            rc = self._client.loop(timeout=1.0)
+            if rc != mqtt.MQTT_ERR_SUCCESS:
+                self._connect_error = f"Network loop error: {mqtt.error_string(rc)}"
+                _LOGGER.error("paho loop() returned error: %s (rc=%d)", mqtt.error_string(rc), rc)
+                break
 
         if not self._connected:
+            sock = self._client.socket()
             _LOGGER.error(
-                "MQTT connection timed out after %ds: connected=%s, error=%s, "
-                "socket=%s",
-                MQTT_CONNECT_TIMEOUT, self._connected, self._connect_error,
-                self._client.socket() if self._client else "no client",
+                "MQTT CONNACK not received after %ds: error=%s, socket=%s, "
+                "socket_open=%s",
+                MQTT_CONNECT_TIMEOUT, self._connect_error,
+                sock, sock is not None and sock.fileno() >= 0 if sock else False,
             )
-            self._client.loop_stop()
+            try:
+                self._client.disconnect()
+            except Exception:
+                pass
             raise BluettiMqttError(
-                f"MQTT connection failed: {self._connect_error or 'timeout'}"
+                f"MQTT connection failed: {self._connect_error or 'no CONNACK received'}"
             )
 
-        _LOGGER.info("MQTT connected to %s", MQTT_BROKER)
+        # Step 6: Connection established — start background loop for ongoing I/O
+        self._client.loop_start()
+        _LOGGER.info("MQTT connected to %s (background loop started)", MQTT_BROKER)
 
     def disconnect(self) -> None:
         """Disconnect from the MQTT broker."""
         if self._client:
             self._client.loop_stop()
-            self._client.disconnect()
+            try:
+                self._client.disconnect()
+            except Exception:
+                pass
             self._client = None
             self._connected = False
 
@@ -485,7 +523,9 @@ class BluettiMqttClient:
                 f"MQTT publish failed: {mqtt.error_string(result.rc)}"
             )
 
-    # -- paho-mqtt callbacks (run in paho's network thread) --
+    # -- paho-mqtt callbacks --
+    # When using manual loop(), these run in the SAME thread as loop().
+    # When using loop_start(), these run in paho's background thread.
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         try:
@@ -496,49 +536,57 @@ class BluettiMqttClient:
             if reason_code == 0 or str(reason_code) == "Success":
                 _LOGGER.info("MQTT connected successfully")
                 self._connected = True
-                # (Re-)subscribe to all tracked topics on connect/reconnect
                 for topic in self._subscriptions:
                     client.subscribe(topic, qos=1)
-                    _LOGGER.debug("(Re-)subscribed to %s", topic)
+                    _LOGGER.debug("Subscribed to %s", topic)
             else:
                 _LOGGER.error("MQTT connect rejected: %r", reason_code)
                 self._connect_error = str(reason_code)
         except Exception:
             _LOGGER.exception("Exception in _on_connect callback")
+            self._connect_error = "callback exception"
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
-        _LOGGER.debug("MQTT disconnected: %s (was_connected=%s)", reason_code, self._connected)
-        if not self._connected:
-            # Disconnected before ever connecting — TLS or auth failure
-            self._connect_error = f"Connection rejected: {reason_code}"
-        self._connected = False
+        try:
+            _LOGGER.debug(
+                "MQTT disconnected: reason=%s, was_connected=%s",
+                reason_code, self._connected,
+            )
+            if not self._connected:
+                self._connect_error = f"Connection rejected: {reason_code}"
+            self._connected = False
+        except Exception:
+            _LOGGER.exception("Exception in _on_disconnect callback")
 
     def _on_message(self, client, userdata, message):
         """Handle incoming MQTT messages (telemetry frames).
 
-        This runs in paho's network thread. We parse the Modbus frame here
-        and dispatch to the telemetry callback via the event loop (thread-safe).
+        Parses the Modbus frame and dispatches to the telemetry callback
+        via the HA event loop (thread-safe).
         """
-        parsed = parse_mqtt_payload(message.payload)
-        if not parsed:
+        try:
+            parsed = parse_mqtt_payload(message.payload)
+            if not parsed:
+                _LOGGER.debug(
+                    "Unparseable MQTT message on %s: %s",
+                    message.topic,
+                    message.payload.hex() if message.payload else "(empty)",
+                )
+                return
+
             _LOGGER.debug(
-                "Unparseable MQTT message on %s: %s",
-                message.topic, message.payload.hex() if message.payload else "(empty)",
+                "MQTT telemetry on %s: FC=%d len=%d",
+                message.topic, parsed["function_code"],
+                len(parsed.get("data", b"")),
             )
-            return
 
-        _LOGGER.debug(
-            "MQTT telemetry on %s: FC=%d len=%d",
-            message.topic, parsed["function_code"],
-            len(parsed.get("data", b"")),
-        )
+            callback = self._on_telemetry
+            if callback is None:
+                return
 
-        callback = self._on_telemetry
-        if callback is None:
-            return
-
-        # Dispatch to HA event loop thread-safely (never call directly from paho thread)
-        if self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(callback, message.topic, parsed)
-        else:
-            _LOGGER.warning("Cannot dispatch telemetry — event loop not available")
+            if self._loop is not None and self._loop.is_running():
+                self._loop.call_soon_threadsafe(callback, message.topic, parsed)
+            else:
+                _LOGGER.warning("Cannot dispatch telemetry — event loop not available")
+        except Exception:
+            _LOGGER.exception("Exception in _on_message callback")
