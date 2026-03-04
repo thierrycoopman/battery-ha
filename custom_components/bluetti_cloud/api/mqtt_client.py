@@ -31,7 +31,7 @@ from typing import Any
 import aiohttp
 import paho.mqtt.client as mqtt
 
-from .modbus import build_mqtt_payload, parse_mqtt_payload
+from .modbus import build_mqtt_payload, build_read_mqtt_payload, parse_mqtt_payload
 from .totp import generate_totp
 from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
 
@@ -378,6 +378,31 @@ class BluettiMqttClient:
         _LOGGER.debug(
             "MQTT publish %s: reg=%d val=%d payload=%s",
             topic, register, value, payload.hex(),
+        )
+
+        result = self._client.publish(topic, payload, qos=1)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise BluettiMqttError(
+                f"MQTT publish failed: {mqtt.error_string(result.rc)}"
+            )
+
+    def send_read_request(
+        self, model: str, sub_sn: str, register: int, count: int,
+        slave_addr: int = 1,
+    ) -> None:
+        """Send a Modbus FC=03 read request to a device via MQTT.
+
+        The device will respond on the PUB topic with the requested register data.
+        """
+        if not self._client or not self._connected:
+            raise BluettiMqttError("Not connected to MQTT broker")
+
+        topic = f"SUB/{model}/{sub_sn}"
+        payload = build_read_mqtt_payload(register, count, slave_addr)
+
+        _LOGGER.debug(
+            "MQTT read request %s: reg=%d count=%d slave=%d payload=%s",
+            topic, register, count, slave_addr, payload.hex(),
         )
 
         result = self._client.publish(topic, payload, qos=1)

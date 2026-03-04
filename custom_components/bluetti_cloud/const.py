@@ -9,3 +9,5 @@ GW_PRIMARY_URL = "https://gwpry.bluettipower.com"
 
 DEFAULT_SCAN_INTERVAL = 30  # seconds — REST-only fallback
 MQTT_SCAN_INTERVAL = 60  # seconds — REST interval when MQTT is active
+MQTT_POLL_INTERVAL = 10  # seconds between full MQTT polling cycles
+MQTT_REQUEST_TIMEOUT = 3.0  # seconds to wait for a single MQTT response

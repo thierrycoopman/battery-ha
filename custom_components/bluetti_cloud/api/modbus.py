@@ -23,6 +23,16 @@ DC_SWITCH = 3008  # 0x0BC0 — ProtocolAddr.DC_SWITCH
 SWITCH_ON = 1
 SWITCH_OFF = 0
 
+# FC=03 read register addresses (ProtocolAddrV2.java)
+HOME_DATA = 100          # Aggregate SOC, V/I, charging status, switch states
+PACK_MAIN_INFO = 6000    # Battery summary: total V/I/SOC/SOH, temp, charge times
+PACK_ITEM_INFO = 6100    # Per-battery pack: V, I, SOC, SOH, temp, status
+
+# Register counts for FC=03 reads (number of 16-bit registers)
+HOME_DATA_COUNT = 62         # 124 bytes
+PACK_MAIN_INFO_COUNT = 34    # 68 bytes
+PACK_ITEM_INFO_COUNT = 90    # 180 bytes
+
 # Modbus function codes
 FUNC_READ_HOLDING = 0x03
 FUNC_WRITE_SINGLE = 0x06
@@ -93,6 +103,48 @@ def build_mqtt_payload(register: int, value: int, slave_addr: int = DEFAULT_SLAV
     """
     modbus_frame = build_write_command(register, value, slave_addr)
     # Prefix with protocol type byte: 0x01 = MODBUS_RTU
+    return bytes([0x01]) + modbus_frame
+
+
+def build_read_command(
+    register: int,
+    count: int,
+    slave_addr: int = DEFAULT_SLAVE_ADDR,
+) -> bytes:
+    """Build a Modbus RTU read holding registers command (FC=03).
+
+    Frame format: [slave(1)] [0x03(1)] [register(2)] [count(2)] [CRC(2)]
+
+    Args:
+        register: Starting register address (e.g., HOME_DATA=100).
+        count: Number of 16-bit registers to read.
+        slave_addr: Modbus slave address (default 1).
+
+    Returns:
+        Complete Modbus RTU frame as bytes.
+    """
+    frame = bytes([
+        slave_addr,
+        FUNC_READ_HOLDING,
+        (register >> 8) & 0xFF,
+        register & 0xFF,
+        (count >> 8) & 0xFF,
+        count & 0xFF,
+    ])
+    return frame + crc16_modbus(frame)
+
+
+def build_read_mqtt_payload(
+    register: int,
+    count: int,
+    slave_addr: int = DEFAULT_SLAVE_ADDR,
+) -> bytes:
+    """Build the full MQTT payload for a register read request.
+
+    The MQTT payload is: protocol_type_byte + modbus_frame.
+    Protocol type 0x01 = MODBUS_RTU.
+    """
+    modbus_frame = build_read_command(register, count, slave_addr)
     return bytes([0x01]) + modbus_frame
 
 
@@ -316,5 +368,88 @@ def parse_home_data(data: bytes) -> dict[str, Any]:
 
     if len(data) > 123:
         result["inv_working_status"] = data[123]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# PackMainInfo parser — register 6000 (ProtocolParserV2.java:parsePackMainInfo)
+# ---------------------------------------------------------------------------
+
+def parse_pack_main_info(data: bytes) -> dict[str, Any]:
+    """Parse PackMainInfo register values into named fields.
+
+    Returns aggregate battery pack data: total voltage, current, SOC, SOH,
+    temperature, charge/discharge times, and pack count/online mask.
+    """
+    result: dict[str, Any] = {}
+
+    if len(data) < 20:
+        return result
+
+    result["pack_volt_type"] = _u16(data, 0)
+    if len(data) > 3:
+        result["pack_count"] = data[3]
+    if len(data) > 5:
+        result["pack_online_mask"] = _u16(data, 4)
+    result["pack_total_voltage"] = _u16(data, 6) / 10.0
+    result["pack_total_current"] = _s16(data, 8) / 10.0
+    if len(data) > 11:
+        result["pack_total_soc"] = data[11]
+    if len(data) > 13:
+        result["pack_total_soh"] = data[13]
+    if len(data) > 15:
+        result["pack_average_temp"] = _u16(data, 14) - 40
+    if len(data) > 17:
+        result["pack_running_status"] = data[17]
+    if len(data) > 19:
+        result["pack_charging_status"] = data[19]
+        result["pack_charging_status_text"] = CHARGING_STATUS_MAP.get(
+            data[19], f"unknown({data[19]})"
+        )
+
+    if len(data) > 35:
+        result["charge_full_time"] = _u16(data, 34)
+    if len(data) > 37:
+        result["discharge_empty_time"] = _u16(data, 36)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# PackItemInfo parser — register 6100 (ProtocolParserV2.java:parsePackItemInfo)
+# ---------------------------------------------------------------------------
+
+def parse_pack_item_info(data: bytes) -> dict[str, Any]:
+    """Parse PackItemInfo register values for a single battery pack.
+
+    Returns per-pack data: pack_id, type, serial number, voltage, current,
+    SOC, SOH, temperature, and charging status.
+    """
+    result: dict[str, Any] = {}
+
+    if len(data) < 26:
+        return result
+
+    result["pack_id"] = data[1]
+    result["pack_type"] = _ascii(data, 2, 12)
+    result["pack_sn"] = _ascii(data, 14, 8)
+    result["pack_voltage"] = _u16(data, 22) / 100.0
+    result["pack_current"] = _s16(data, 24) / 10.0
+
+    if len(data) > 27:
+        result["pack_soc"] = data[27]
+    if len(data) > 29:
+        result["pack_soh"] = data[29]
+    if len(data) > 31:
+        result["pack_average_temp"] = _u16(data, 30) - 40
+
+    if len(data) > 49:
+        result["pack_running_status"] = data[49]
+    if len(data) > 51:
+        result["pack_charging_status"] = data[51]
+        result["pack_charging_status_text"] = CHARGING_STATUS_MAP.get(
+            data[51], f"unknown({data[51]})"
+        )
 
     return result

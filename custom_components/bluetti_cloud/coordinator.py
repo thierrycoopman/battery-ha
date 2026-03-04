@@ -5,11 +5,17 @@ charging status, and switch states. REST API provides power readings (PV/AC/DC/G
 energy totals, and online status at a slower interval (60s when MQTT is active,
 30s as fallback).
 
+Active MQTT polling sends FC=03 read requests for homeData (reg 100),
+PackMainInfo (reg 6000), and PackItemInfo (reg 6100) per battery pack.
+The device only sends data when explicitly asked via these read commands.
+
 Data merge rule: MQTT data takes precedence for fields it provides (more current);
 REST fills in fields MQTT cannot provide.
 """
 
+import asyncio
 import logging
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -23,10 +29,24 @@ from .api.modbus import (
     DC_SWITCH,
     FUNC_READ_HOLDING,
     FUNC_WRITE_SINGLE,
+    HOME_DATA,
+    HOME_DATA_COUNT,
+    PACK_ITEM_INFO,
+    PACK_ITEM_INFO_COUNT,
+    PACK_MAIN_INFO,
+    PACK_MAIN_INFO_COUNT,
     parse_home_data,
+    parse_pack_item_info,
+    parse_pack_main_info,
 )
 from .api.mqtt_client import BluettiMqttClient, BluettiMqttError
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, MQTT_SCAN_INTERVAL
+from .const import (
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    MQTT_POLL_INTERVAL,
+    MQTT_REQUEST_TIMEOUT,
+    MQTT_SCAN_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,6 +134,22 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             "energy_total": float | None,
             "last_update": str | None,
             "mqtt_active": bool,               # whether MQTT is providing data
+            # PackMainInfo fields (from active polling):
+            "pack_total_voltage": float | None,
+            "pack_total_current": float | None,
+            "pack_total_soc": int | None,
+            "pack_total_soh": int | None,
+            "pack_average_temp": int | None,
+            "charge_full_time": int | None,
+            "discharge_empty_time": int | None,
+            # Per-pack fields (dynamic, from active polling):
+            "pack_1_voltage": float | None,
+            "pack_1_current": float | None,
+            "pack_1_soc": int | None,
+            "pack_1_soh": int | None,
+            "pack_1_temp": int | None,
+            "pack_1_charging_status": str | None,
+            # ... pack_2_*, pack_3_*, etc.
         }
     """
 
@@ -144,6 +180,17 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         # Cache last known data so entities don't go unavailable on transient errors
         self._last_good_data: dict[str, dict[str, Any]] = {}
 
+        # -- Active MQTT polling state --
+        self._poll_task: asyncio.Task | None = None
+        # Pending request tracking for response routing
+        self._pending_request: tuple[int, int] | None = None  # (register, slave_addr)
+        self._response_event: asyncio.Event = asyncio.Event()
+        self._response_data: bytes | None = None
+        # Discovered pack counts per device (for dynamic sensor creation)
+        self._pack_counts: dict[str, int] = {}
+        # Callbacks for new pack discovery
+        self._new_pack_callbacks: list[Callable[[str, int], None]] = []
+
     @property
     def client(self) -> BluettiCloudApi:
         return self._client
@@ -155,6 +202,17 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     @property
     def mqtt_connected(self) -> bool:
         return self._mqtt_connected and self._mqtt_client is not None and self._mqtt_client.is_connected
+
+    def get_pack_count(self, sn: str) -> int:
+        """Return the discovered pack count for a device."""
+        return self._pack_counts.get(sn, 0)
+
+    def register_new_pack_callback(self, callback: Callable[[str, int], None]) -> None:
+        """Register a callback for when new battery packs are discovered.
+
+        Callback signature: (device_sn: str, pack_count: int) -> None
+        """
+        self._new_pack_callbacks.append(callback)
 
     # -- MQTT lifecycle --
 
@@ -205,8 +263,22 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             MQTT_SCAN_INTERVAL,
         )
 
+        # Start active polling loop
+        self._start_polling()
+
+    def _start_polling(self) -> None:
+        """Start the active MQTT polling task."""
+        if self._poll_task and not self._poll_task.done():
+            return
+        self._poll_task = self.hass.async_create_task(
+            self._polling_loop(), "bluetti_mqtt_poll"
+        )
+
     def async_stop_mqtt(self) -> None:
         """Disconnect MQTT client and clean up."""
+        if self._poll_task and not self._poll_task.done():
+            self._poll_task.cancel()
+            self._poll_task = None
         if self._mqtt_client:
             self._mqtt_client.disconnect()
             self._mqtt_client.cleanup_pem_files()
@@ -215,6 +287,95 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._topic_to_sn.clear()
         # Restore faster REST polling
         self.update_interval = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+
+    # -- Active MQTT polling --
+
+    async def _polling_loop(self) -> None:
+        """Periodically send FC=03 read requests for all devices.
+
+        Sends requests sequentially: homeData, PackMainInfo, then PackItemInfo
+        for each known battery pack. Waits for each response before sending next.
+        """
+        _LOGGER.debug("MQTT polling loop started (interval=%ds)", MQTT_POLL_INTERVAL)
+        try:
+            while True:
+                if not self.mqtt_connected:
+                    _LOGGER.debug("MQTT not connected, skipping poll cycle")
+                    await asyncio.sleep(MQTT_POLL_INTERVAL)
+                    continue
+
+                for sn, dev_data in (self.data or {}).items():
+                    model = dev_data.get("device_type", "")
+                    sub_sn = dev_data.get("sub_sn", "")
+                    if not model or not sub_sn:
+                        continue
+
+                    # 1. Read homeData (reg 100)
+                    await self._poll_register(
+                        sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT
+                    )
+
+                    # 2. Read PackMainInfo (reg 6000)
+                    await self._poll_register(
+                        sn, model, sub_sn, PACK_MAIN_INFO, PACK_MAIN_INFO_COUNT
+                    )
+
+                    # 3. Read PackItemInfo (reg 6100) for each known pack
+                    pack_count = self._pack_counts.get(sn, 0)
+                    for pack_idx in range(1, pack_count + 1):
+                        await self._poll_register(
+                            sn, model, sub_sn, PACK_ITEM_INFO, PACK_ITEM_INFO_COUNT,
+                            slave_addr=pack_idx,
+                        )
+
+                await asyncio.sleep(MQTT_POLL_INTERVAL)
+        except asyncio.CancelledError:
+            _LOGGER.debug("MQTT polling loop cancelled")
+        except Exception:
+            _LOGGER.exception("MQTT polling loop crashed")
+
+    async def _poll_register(
+        self,
+        sn: str,
+        model: str,
+        sub_sn: str,
+        register: int,
+        count: int,
+        slave_addr: int = 1,
+    ) -> None:
+        """Send a single FC=03 read request and wait for response."""
+        if not self._mqtt_client or not self._mqtt_client.is_connected:
+            return
+
+        # Set up pending request tracking
+        self._pending_request = (register, slave_addr)
+        self._response_event.clear()
+        self._response_data = None
+
+        try:
+            self._mqtt_client.send_read_request(
+                model, sub_sn, register, count, slave_addr
+            )
+        except BluettiMqttError:
+            _LOGGER.debug(
+                "Failed to send read request for %s reg=%d slave=%d",
+                sn, register, slave_addr,
+            )
+            self._pending_request = None
+            return
+
+        # Wait for response
+        try:
+            await asyncio.wait_for(
+                self._response_event.wait(), timeout=MQTT_REQUEST_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.debug(
+                "Timeout waiting for response: %s reg=%d slave=%d",
+                sn, register, slave_addr,
+            )
+        finally:
+            self._pending_request = None
 
     # -- MQTT message handling --
 
@@ -233,11 +394,33 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self._handle_write_echo(sn, parsed)
 
     def _handle_telemetry_data(self, sn: str, parsed: dict) -> None:
-        """Process FC=03 homeData telemetry frame."""
+        """Process FC=03 response, routing to correct parser based on pending request."""
         register_data = parsed.get("register_data", b"")
         if not register_data:
             return
 
+        # Determine which parser to use based on pending request
+        pending = self._pending_request
+        if pending is not None:
+            register, slave_addr = pending
+        else:
+            # No pending request — assume homeData (passive response / unsolicited)
+            register = HOME_DATA
+            slave_addr = 1
+
+        if register == HOME_DATA:
+            self._process_home_data(sn, register_data)
+        elif register == PACK_MAIN_INFO:
+            self._process_pack_main_info(sn, register_data)
+        elif register == PACK_ITEM_INFO:
+            self._process_pack_item_info(sn, register_data, slave_addr)
+
+        # Signal the polling loop that a response arrived
+        self._response_data = register_data
+        self._response_event.set()
+
+    def _process_home_data(self, sn: str, register_data: bytes) -> None:
+        """Parse and store homeData fields."""
         home_data = parse_home_data(register_data)
         if not home_data:
             return
@@ -251,22 +434,99 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             home_data.get("charging_status"),
         )
 
-        # Accumulate MQTT data for this device
         mqtt_overlay = self._mqtt_data.setdefault(sn, {})
 
-        # Copy sensor fields
         for field in _MQTT_SENSOR_FIELDS:
             if field in home_data:
                 mqtt_overlay[field] = home_data[field]
 
-        # Map ctrl_status bits to switch state fields
         for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
             if ctrl_key in home_data:
                 mqtt_overlay[switch_key] = home_data[ctrl_key]
 
         mqtt_overlay["mqtt_active"] = True
+        self._push_mqtt_update()
 
-        # Push update to HA entities immediately
+    def _process_pack_main_info(self, sn: str, register_data: bytes) -> None:
+        """Parse and store PackMainInfo fields."""
+        pack_main = parse_pack_main_info(register_data)
+        if not pack_main:
+            return
+
+        _LOGGER.debug(
+            "MQTT PackMainInfo for %s: total_soc=%s total_v=%s packs=%s",
+            sn,
+            pack_main.get("pack_total_soc"),
+            pack_main.get("pack_total_voltage"),
+            pack_main.get("pack_count"),
+        )
+
+        mqtt_overlay = self._mqtt_data.setdefault(sn, {})
+
+        # Store pack summary fields
+        for field in (
+            "pack_total_voltage", "pack_total_current",
+            "pack_total_soc", "pack_total_soh",
+            "pack_average_temp", "charge_full_time", "discharge_empty_time",
+            "pack_charging_status_text",
+        ):
+            if field in pack_main:
+                mqtt_overlay[field] = pack_main[field]
+
+        # Track pack count for dynamic sensor creation
+        pack_count = pack_main.get("pack_count", 0)
+        if pack_count and pack_count != self._pack_counts.get(sn, 0):
+            old_count = self._pack_counts.get(sn, 0)
+            self._pack_counts[sn] = pack_count
+            _LOGGER.info(
+                "Device %s: discovered %d battery packs (was %d)",
+                sn, pack_count, old_count,
+            )
+            for cb in self._new_pack_callbacks:
+                try:
+                    cb(sn, pack_count)
+                except Exception:
+                    _LOGGER.exception("Error in new pack callback")
+
+        mqtt_overlay["mqtt_active"] = True
+        self._push_mqtt_update()
+
+    def _process_pack_item_info(
+        self, sn: str, register_data: bytes, slave_addr: int
+    ) -> None:
+        """Parse and store per-battery PackItemInfo fields."""
+        pack_item = parse_pack_item_info(register_data)
+        if not pack_item:
+            return
+
+        # Use pack_id from response data if available, else fall back to slave_addr
+        pack_id = pack_item.get("pack_id", slave_addr)
+
+        _LOGGER.debug(
+            "MQTT PackItemInfo for %s pack %d: soc=%s v=%s i=%s",
+            sn, pack_id,
+            pack_item.get("pack_soc"),
+            pack_item.get("pack_voltage"),
+            pack_item.get("pack_current"),
+        )
+
+        mqtt_overlay = self._mqtt_data.setdefault(sn, {})
+
+        # Store per-pack data with pack_N_ prefix
+        prefix = f"pack_{pack_id}_"
+        field_map = {
+            "pack_voltage": "voltage",
+            "pack_current": "current",
+            "pack_soc": "soc",
+            "pack_soh": "soh",
+            "pack_average_temp": "temp",
+            "pack_charging_status_text": "charging_status",
+        }
+        for src_key, dst_suffix in field_map.items():
+            if src_key in pack_item:
+                mqtt_overlay[f"{prefix}{dst_suffix}"] = pack_item[src_key]
+
+        mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()
 
     def _handle_write_echo(self, sn: str, parsed: dict) -> None:
