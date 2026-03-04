@@ -6,6 +6,7 @@ import pytest
 
 from custom_components.bluetti_cloud.api.modbus import (
     AC_SWITCH,
+    BATTERY_STATE_MAP,
     DC_SWITCH,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
     EXCEPTION_ILLEGAL_FUNCTION,
@@ -26,6 +27,7 @@ from custom_components.bluetti_cloud.api.modbus import (
     build_read_mqtt_payload,
     build_write_command,
     crc16_modbus,
+    parse_fc16_registers,
     parse_home_data,
     parse_mqtt_payload,
     parse_pack_item_info,
@@ -604,3 +606,148 @@ def test_parse_pack_item_info_minimal():
     # Optional fields not present
     assert "pack_soc" not in result
     assert "pack_soh" not in result
+
+
+# -- FC=16 register parser (AC300 register map) --
+
+def _build_fc16_block(start_addr: int, reg_values: dict[int, int]) -> tuple[int, bytes]:
+    """Build FC=16 register data for testing.
+
+    Args:
+        start_addr: Starting register address.
+        reg_values: Dict of register_addr → raw u16 value.
+
+    Returns:
+        (start_addr, register_data_bytes)
+    """
+    if not reg_values:
+        return start_addr, b""
+    max_offset = max(addr - start_addr for addr in reg_values) + 1
+    data = bytearray(max_offset * 2)
+    for addr, val in reg_values.items():
+        offset = addr - start_addr
+        struct.pack_into(">H", data, offset * 2, val)
+    return start_addr, bytes(data)
+
+
+def test_parse_fc16_soc_from_block_36():
+    """FC=16 at start_addr=36 should extract total_battery_percent (reg 43)."""
+    start_addr, data = _build_fc16_block(36, {43: 100})
+    result = parse_fc16_registers(start_addr, data)
+    assert result["total_battery_percent"] == 100
+
+
+def test_parse_fc16_power_readings():
+    """FC=16 at start_addr=36 should extract power readings."""
+    start_addr, data = _build_fc16_block(36, {
+        36: 350,   # dc_input_power = 350W (PV)
+        37: 0,     # ac_input_power = 0W
+        38: 200,   # ac_output_power = 200W
+        39: 50,    # dc_output_power = 50W
+    })
+    result = parse_fc16_registers(start_addr, data)
+    assert result["dc_input_power"] == 350
+    assert result["ac_input_power"] == 0
+    assert result["ac_output_power"] == 200
+    assert result["dc_output_power"] == 50
+
+
+def test_parse_fc16_switches():
+    """FC=16 at start_addr=36 should extract switch states."""
+    start_addr, data = _build_fc16_block(36, {48: 1, 49: 0})
+    result = parse_fc16_registers(start_addr, data)
+    assert result["ac_output_on"] is True
+    assert result["dc_output_on"] is False
+
+
+def test_parse_fc16_battery_pack_data():
+    """FC=16 at start_addr=70 should extract pack data."""
+    start_addr, data = _build_fc16_block(70, {
+        91: 2,      # pack_num_max = 2 packs
+        92: 552,    # total_battery_voltage = 55.2V
+        93: 30,     # total_battery_current = 3.0A
+        96: 1,      # pack_num = 1 (currently reporting pack 1)
+        97: 1,      # pack_status = 1 (charging)
+        98: 5280,   # pack_voltage = 52.80V
+        99: 99,     # pack_battery_percent = 99%
+    })
+    result = parse_fc16_registers(start_addr, data)
+    assert result["pack_num_max"] == 2
+    assert result["total_battery_voltage"] == 55.2
+    assert result["total_battery_current"] == 3.0
+    assert result["pack_num"] == 1
+    assert result["charging_status"] == "charging"
+    assert result["pack_status_raw"] == 1
+    assert result["pack_voltage"] == 52.80
+    assert result["pack_battery_percent"] == 99
+
+
+def test_parse_fc16_battery_state_standby():
+    """pack_status=0 should map to 'standby'."""
+    start_addr, data = _build_fc16_block(70, {97: 0})
+    result = parse_fc16_registers(start_addr, data)
+    assert result["charging_status"] == "standby"
+
+
+def test_parse_fc16_battery_state_discharging():
+    """pack_status=2 should map to 'discharging'."""
+    start_addr, data = _build_fc16_block(70, {97: 2})
+    result = parse_fc16_registers(start_addr, data)
+    assert result["charging_status"] == "discharging"
+
+
+def test_parse_fc16_ctrl_registers():
+    """FC=16 at start_addr=3000 should extract control switches."""
+    start_addr, data = _build_fc16_block(3000, {3007: 1, 3008: 0})
+    result = parse_fc16_registers(start_addr, data)
+    assert result["ctrl_ac_switch"] is True
+    assert result["ctrl_dc_switch"] is False
+
+
+def test_parse_fc16_empty_block():
+    """Empty register data should return empty dict."""
+    result = parse_fc16_registers(0, b"")
+    assert result == {}
+
+
+def test_parse_fc16_no_known_registers():
+    """Block with no known registers should return empty dict."""
+    # Registers 130-139 are not in the AC300 map
+    data = bytearray(20)  # 10 registers at start_addr=130
+    result = parse_fc16_registers(130, data)
+    assert result == {}
+
+
+def test_parse_fc16_full_cycle():
+    """Simulate a complete FC=16 push cycle and verify all key fields."""
+    mqtt_data = {}
+
+    # Block 1: start_addr=36 (power + SOC + switches)
+    _, data = _build_fc16_block(36, {
+        36: 500, 37: 0, 38: 300, 39: 100,
+        43: 95, 48: 1, 49: 1,
+    })
+    mqtt_data.update(parse_fc16_registers(36, data))
+
+    # Block 2: start_addr=70 (pack data)
+    _, data = _build_fc16_block(70, {
+        91: 2, 92: 540, 93: 15, 96: 1, 97: 1, 98: 5320, 99: 96,
+    })
+    mqtt_data.update(parse_fc16_registers(70, data))
+
+    # Block 3: start_addr=3000 (ctrl registers)
+    _, data = _build_fc16_block(3000, {3007: 1, 3008: 1})
+    mqtt_data.update(parse_fc16_registers(3000, data))
+
+    # Verify complete picture
+    assert mqtt_data["total_battery_percent"] == 95
+    assert mqtt_data["dc_input_power"] == 500
+    assert mqtt_data["ac_output_power"] == 300
+    assert mqtt_data["ac_output_on"] is True
+    assert mqtt_data["pack_num_max"] == 2
+    assert mqtt_data["total_battery_voltage"] == 54.0
+    assert mqtt_data["total_battery_current"] == 1.5
+    assert mqtt_data["charging_status"] == "charging"
+    assert mqtt_data["pack_voltage"] == 53.20
+    assert mqtt_data["pack_battery_percent"] == 96
+    assert mqtt_data["ctrl_ac_switch"] is True

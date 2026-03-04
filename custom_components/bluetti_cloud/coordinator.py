@@ -26,6 +26,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api.client import BluettiCloudApi, BluettiCloudApiError
 from .api.modbus import (
     AC_SWITCH,
+    BATTERY_STATE_MAP,
     DC_SWITCH,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
     FUNC_ERROR_MASK,
@@ -38,6 +39,7 @@ from .api.modbus import (
     PACK_ITEM_INFO_COUNT,
     PACK_MAIN_INFO,
     PACK_MAIN_INFO_COUNT,
+    parse_fc16_registers,
     parse_home_data,
     parse_pack_item_info,
     parse_pack_main_info,
@@ -436,9 +438,15 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         frame format, which includes start_addr — allowing us to route to the
         correct parser without relying on pending request tracking.
 
+        Two parsing paths:
+        1. AC300 register map (parse_fc16_registers): extracts fields from raw
+           register addresses (0, 36, 70, 130, 3000) — works for all V1 devices.
+        2. V2 register routing (_route_register_data): routes to V2 parsers when
+           start_addr matches V2 register constants (100, 6000, 6100).
+
         Only signals the response event if start_addr matches the pending
-        request's register, to avoid unsolicited pushes (at unrelated
-        start_addrs) from prematurely unblocking the polling loop.
+        request's register, to avoid unsolicited pushes from prematurely
+        unblocking the polling loop.
         """
         register_data = parsed.get("register_data", b"")
         start_addr = parsed.get("start_addr")
@@ -450,7 +458,10 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             sn, start_addr, len(register_data),
         )
 
-        # Determine slave_addr from pending request if available
+        # Parse using AC300 register map (actual register addresses)
+        self._process_fc16_data(sn, start_addr, register_data)
+
+        # Also route to V2 parsers if start_addr matches V2 register addresses
         slave_addr = 1
         pending = self._pending_request
         if pending is not None:
@@ -506,9 +517,26 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self._process_pack_item_info(sn, register_data, slave_addr)
 
     def _process_home_data(self, sn: str, register_data: bytes) -> None:
-        """Parse and store homeData fields."""
+        """Parse and store homeData fields.
+
+        Validates the parsed data before applying — the V2 homeData parser
+        produces garbage for V1 devices (AC300, protocolVer < 2001) because
+        register 100 has a different layout on those devices.
+        """
         home_data = parse_home_data(register_data)
         if not home_data:
+            return
+
+        # Validate: reject if charging_status is not a known code.
+        # V1 devices (AC300) return unrelated register data at address 100,
+        # which parse_home_data() misinterprets as charging_status=5760, soc=36, etc.
+        raw_status = home_data.get("charging_status_raw")
+        if raw_status is not None and raw_status > 10:
+            _LOGGER.debug(
+                "Skipping homeData for %s: invalid charging_status_raw=%d "
+                "(likely wrong register layout for this device)",
+                sn, raw_status,
+            )
             return
 
         _LOGGER.debug(
@@ -611,6 +639,84 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         for src_key, dst_suffix in field_map.items():
             if src_key in pack_item:
                 mqtt_overlay[f"{prefix}{dst_suffix}"] = pack_item[src_key]
+
+        mqtt_overlay["mqtt_active"] = True
+        self._push_mqtt_update()
+
+    def _process_fc16_data(
+        self, sn: str, start_addr: int, register_data: bytes
+    ) -> None:
+        """Parse FC=16 register block using the AC300 register map.
+
+        Maps raw Modbus register values to coordinator data keys.
+        Handles per-pack data cycling (register 96 = pack_num selects
+        which pack's data appears in registers 97-99).
+        """
+        fields = parse_fc16_registers(start_addr, register_data)
+        if not fields:
+            return
+
+        mqtt_overlay = self._mqtt_data.setdefault(sn, {})
+
+        # Map FC=16 field names to coordinator data keys
+        _FC16_FIELD_MAP = {
+            "total_battery_percent": "battery_soc",
+            "total_battery_voltage": "pack_voltage",
+            "total_battery_current": "pack_current",
+            "dc_input_power": "power_pv_in",
+            "ac_input_power": "power_grid_in",
+            "ac_output_power": "power_ac_out",
+            "dc_output_power": "power_dc_out",
+            "ac_output_on": "ac_switch",
+            "dc_output_on": "dc_switch",
+            "ctrl_ac_switch": "ac_switch",
+            "ctrl_dc_switch": "dc_switch",
+            "pack_num_max": "pack_count",
+            "charging_status": "charging_status",
+        }
+
+        for src_key, dst_key in _FC16_FIELD_MAP.items():
+            if src_key in fields:
+                mqtt_overlay[dst_key] = fields[src_key]
+
+        # Also populate pack_total_* fields (same as pack_* for aggregate values)
+        if "total_battery_voltage" in fields:
+            mqtt_overlay["pack_total_voltage"] = fields["total_battery_voltage"]
+        if "total_battery_current" in fields:
+            mqtt_overlay["pack_total_current"] = fields["total_battery_current"]
+        if "total_battery_percent" in fields:
+            mqtt_overlay["pack_total_soc"] = fields["total_battery_percent"]
+
+        # Handle per-pack data: reg 96 tells us which pack, regs 97-99 are its data
+        pack_num = fields.get("pack_num")
+        if pack_num and pack_num > 0:
+            prefix = f"pack_{pack_num}_"
+            if "pack_voltage" in fields:
+                mqtt_overlay[f"{prefix}voltage"] = fields["pack_voltage"]
+            if "pack_battery_percent" in fields:
+                mqtt_overlay[f"{prefix}soc"] = fields["pack_battery_percent"]
+            if "charging_status" in fields:
+                mqtt_overlay[f"{prefix}charging_status"] = fields["charging_status"]
+
+        # Track pack count for dynamic sensor creation
+        pack_count = fields.get("pack_num_max")
+        if pack_count and pack_count > 0 and pack_count != self._pack_counts.get(sn, 0):
+            old_count = self._pack_counts.get(sn, 0)
+            self._pack_counts[sn] = pack_count
+            _LOGGER.info(
+                "Device %s: discovered %d battery packs (was %d)",
+                sn, pack_count, old_count,
+            )
+            for cb in self._new_pack_callbacks:
+                try:
+                    cb(sn, pack_count)
+                except Exception:
+                    _LOGGER.exception("Error in new pack callback")
+
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            logged_fields = {k: v for k, v in fields.items()
+                           if k not in ("pack_status_raw",)}
+            _LOGGER.debug("FC=16 parsed for %s addr=%d: %s", sn, start_addr, logged_fields)
 
         mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()

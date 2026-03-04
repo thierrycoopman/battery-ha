@@ -324,6 +324,90 @@ CTRL_STATUS_BITS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# AC300 FC=16 register parser — from warhammerkid/bluetti_mqtt project
+# ---------------------------------------------------------------------------
+# Bluetti devices push telemetry via FC=16 (Write Multiple Registers) where
+# start_addr = actual Modbus holding register address. This register map was
+# reverse-engineered from Bluetooth Modbus by the bluetti_mqtt community.
+#
+# AC300 FC=16 push cycle (~25s total, 5 blocks):
+#   start_addr=0:    regs 0-35   (device type, serial number, versions)
+#   start_addr=36:   regs 36-69  (power, SOC, output switches)
+#   start_addr=70:   regs 70-129 (AC/DC details, pack data)
+#   start_addr=130:  regs 130+   (extended data)
+#   start_addr=3000: regs 3000-3061 (control registers, switch states)
+
+# Battery state enum (register 97 — pack_status)
+BATTERY_STATE_MAP = {
+    0: "standby",
+    1: "charging",
+    2: "discharging",
+}
+
+# Register address → (field_name, transform)
+# transform: "u16"=raw, "div10"=/10.0, "div100"=/100.0, "bool"=0/1, "battery_state"=enum
+_AC300_REGISTER_MAP: dict[int, tuple[str, str]] = {
+    # Block start_addr=36 (registers 36-69)
+    36: ("dc_input_power", "u16"),           # PV input power (W)
+    37: ("ac_input_power", "u16"),           # Grid/AC input power (W)
+    38: ("ac_output_power", "u16"),          # AC output power (W)
+    39: ("dc_output_power", "u16"),          # DC output power (W)
+    43: ("total_battery_percent", "u16"),    # Aggregate SOC (%)
+    48: ("ac_output_on", "bool"),            # AC output switch
+    49: ("dc_output_on", "bool"),            # DC output switch
+    # Block start_addr=70 (registers 70-129)
+    91: ("pack_num_max", "u16"),             # Number of connected packs
+    92: ("total_battery_voltage", "div10"),  # Aggregate voltage (V)
+    93: ("total_battery_current", "div10"),  # Aggregate current (A)
+    96: ("pack_num", "u16"),                 # Currently reported pack index
+    97: ("pack_status", "battery_state"),    # 0=standby, 1=charge, 2=discharge
+    98: ("pack_voltage", "div100"),          # Current pack voltage (V)
+    99: ("pack_battery_percent", "u16"),     # Current pack SOC (%)
+    # Block start_addr=3000 (registers 3000-3061)
+    3007: ("ctrl_ac_switch", "bool"),
+    3008: ("ctrl_dc_switch", "bool"),
+}
+
+
+def parse_fc16_registers(start_addr: int, register_data: bytes) -> dict[str, Any]:
+    """Parse FC=16 register data using the AC300 register map.
+
+    FC=16 telemetry pushes contain consecutive register values starting
+    at start_addr. Each register is 2 bytes (u16, big-endian).
+
+    Returns dict of field_name → parsed_value for all known registers
+    found in the data block.
+    """
+    result: dict[str, Any] = {}
+    num_regs = len(register_data) // 2
+
+    for offset in range(num_regs):
+        reg_addr = start_addr + offset
+        entry = _AC300_REGISTER_MAP.get(reg_addr)
+        if entry is None:
+            continue
+
+        field_name, transform = entry
+        raw = _u16(register_data, offset * 2)
+
+        if transform == "u16":
+            result[field_name] = raw
+        elif transform == "div10":
+            result[field_name] = raw / 10.0
+        elif transform == "div100":
+            result[field_name] = raw / 100.0
+        elif transform == "bool":
+            result[field_name] = bool(raw)
+        elif transform == "battery_state":
+            result["pack_status_raw"] = raw
+            result["charging_status"] = BATTERY_STATE_MAP.get(
+                raw, f"unknown({raw})"
+            )
+
+    return result
+
+
 def parse_home_data(data: bytes) -> dict[str, Any]:
     """Parse homeData register values into named fields.
 
