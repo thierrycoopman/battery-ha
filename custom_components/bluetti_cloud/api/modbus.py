@@ -25,6 +25,15 @@ DC_SWITCH = 3008    # 0x0BC0 — ProtocolAddr.DC_SWITCH
 AC_SWITCH_V2 = 2011  # 0x07DB — ProtocolAddrV2.AC_SWITCH
 DC_SWITCH_V2 = 2012  # 0x07DC — ProtocolAddrV2.DC_SWITCH
 
+# ECO mode: idle-load auto-shutoff. Each output has an on/off flag plus an
+# auto-off delay (hours) and a power threshold (W) below which it counts as idle.
+DC_ECO_MODE = 2014          # ProtocolAddrV2.CTRL_DC_ECO_MODE, 0/1
+DC_ECO_AUTO_OFF_HOURS = 2015
+DC_ECO_POWER = 2016
+AC_ECO_MODE = 2017          # ProtocolAddrV2.CTRL_AC_ECO_MODE, 0/1
+AC_ECO_AUTO_OFF_HOURS = 2018
+AC_ECO_POWER = 2019
+
 # Switch command values: simple 0/1 for both V1 and V2
 SWITCH_ON = 1
 SWITCH_OFF = 0
@@ -211,7 +220,45 @@ CONTROL_REGISTERS = frozenset({
     DC_SWITCH,       # 3008, V1
     AC_SWITCH_V2,    # 2011, V2
     DC_SWITCH_V2,    # 2012, V2
+    DC_ECO_MODE,     # 2014, V2
+    AC_ECO_MODE,     # 2017, V2
 })
+
+# Numeric settings: register -> (min, max), taken from the ranges the app
+# enforces. Values outside these are refused rather than sent.
+SETTING_RANGES: dict[int, tuple[int, int]] = {
+    DC_ECO_AUTO_OFF_HOURS: (1, 4),
+    DC_ECO_POWER: (5, 20),
+    AC_ECO_AUTO_OFF_HOURS: (1, 4),
+    AC_ECO_POWER: (10, 40),
+}
+
+
+def build_setting_payload(
+    register: int,
+    value: int,
+    slave_addr: int,
+    payload_ver: float,
+) -> bytes:
+    """Build an MQTT payload for a numeric setting write (FC=06).
+
+    Only registers in SETTING_RANGES may be written, and only within their
+    documented range.
+
+    Raises:
+        ValueError: for an unknown register or an out-of-range value.
+    """
+    bounds = SETTING_RANGES.get(register)
+    if bounds is None:
+        raise ValueError(
+            f"register {register} is not a settable register — refusing to write"
+        )
+    low, high = bounds
+    if not low <= value <= high:
+        raise ValueError(
+            f"value {value} out of range for register {register} ({low}-{high})"
+        )
+    return build_mqtt_payload(register, value, slave_addr, payload_ver)
 
 
 def build_switch_payload(
