@@ -103,9 +103,9 @@ AC300_PROFILE = DeviceProfile(
 # AP300 (APEX 300): 2nd-generation IoT (protocolVer >= 2000). Poll-driven MQTT
 # (no unprompted pushes) using the iotPayloadVer-1.2 envelope and Modbus slave 0.
 # The V1 FC=03 register blocks (100/6000/6100) and V2 parsers apply as-is —
-# verified live (homeData 531.3V/95%/2 packs, packMainInfo). Telemetry only for
-# now; AC/DC control (V2 switch registers 2011/2012) is a later step, so the
-# switch registers stay None and outputs surface as read-only binary sensors.
+# verified live (homeData 531.3V/95%/2 packs, packMainInfo).
+# AC/DC output control uses the V2 switch registers (2011/2012) with plain 0/1
+# values — the same encoding as V1, at different addresses.
 AP300_PROFILE = DeviceProfile(
     model="AP300",
     protocol_ver_min=0,
@@ -119,8 +119,8 @@ AP300_PROFILE = DeviceProfile(
         ReadBlock("pack_item_info", 6100, 90, "pack_item_info"),
     ),
     pack_select_reg=None,
-    ac_switch_reg=None,
-    dc_switch_reg=None,
+    ac_switch_reg=2011,
+    dc_switch_reg=2012,
     switch_encoding="simple",
 )
 

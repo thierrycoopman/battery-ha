@@ -20,7 +20,12 @@ PACK_SELECT = 3006  # Write to select which battery pack reports in regs 96-99
 AC_SWITCH = 3007    # 0x0BBF — ProtocolAddr.AC_SWITCH
 DC_SWITCH = 3008    # 0x0BC0 — ProtocolAddr.DC_SWITCH
 
-# Switch command values: simple 0/1 for AC300
+# V2 (2nd-gen IoT, protocolVer >= 2000) control registers. Values are plain
+# 0/1, same as V1 — despite the different register addresses.
+AC_SWITCH_V2 = 2011  # 0x07DB — ProtocolAddrV2.AC_SWITCH
+DC_SWITCH_V2 = 2012  # 0x07DC — ProtocolAddrV2.DC_SWITCH
+
+# Switch command values: simple 0/1 for both V1 and V2
 SWITCH_ON = 1
 SWITCH_OFF = 0
 
@@ -189,6 +194,45 @@ def build_mqtt_payload(
     """
     modbus_frame = build_write_command(register, value, slave_addr)
     return _wrap_mqtt_payload(register, modbus_frame, payload_ver)
+
+
+# ---------------------------------------------------------------------------
+# Output control (guarded)
+# ---------------------------------------------------------------------------
+#
+# Writes are restricted to this allowlist. Neighbouring registers are
+# destructive — on V2 devices 2013 is SYSTEM_POWER_OFF (directly next to the DC
+# switch at 2012), 2206 is a factory reset and 2233 starts a battery-aging
+# routine — so an off-by-one here would shut down or reset a user's hardware.
+CONTROL_REGISTERS = frozenset({
+    AC_SWITCH,       # 3007, V1
+    DC_SWITCH,       # 3008, V1
+    AC_SWITCH_V2,    # 2011, V2
+    DC_SWITCH_V2,    # 2012, V2
+})
+
+
+def build_switch_payload(
+    register: int,
+    value: int,
+    slave_addr: int,
+    payload_ver: float,
+) -> bytes:
+    """Build an MQTT payload for an output-control write (FC=06).
+
+    Only registers in CONTROL_REGISTERS may be written, and only with 0 or 1.
+
+    Raises:
+        ValueError: if the register is not a known control register, or the
+            value is not 0/1.
+    """
+    if register not in CONTROL_REGISTERS:
+        raise ValueError(
+            f"register {register} is not a control register — refusing to write"
+        )
+    if value not in (SWITCH_OFF, SWITCH_ON):
+        raise ValueError(f"invalid switch value {value}: expected 0 or 1")
+    return build_mqtt_payload(register, value, slave_addr, payload_ver)
 
 
 def build_read_command(

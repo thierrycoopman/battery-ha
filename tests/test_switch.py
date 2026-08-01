@@ -6,6 +6,7 @@ import pytest
 
 from custom_components.bluetti_cloud.api.modbus import AC_SWITCH, DC_SWITCH, SWITCH_OFF, SWITCH_ON
 from custom_components.bluetti_cloud.api.mqtt_client import BluettiMqttError
+from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE
 from custom_components.bluetti_cloud.coordinator import BluettiCloudCoordinator
 from custom_components.bluetti_cloud.switch import (
     SWITCH_DESCRIPTIONS,
@@ -65,6 +66,7 @@ def mock_coordinator(coordinator_data, mock_mqtt_client):
     coordinator.last_update_success = True
     coordinator._device_info = {"AC300FAKESERIAL001": {"name": "Winenne", "model": "AC300"}}
     coordinator.mqtt_client = mock_mqtt_client
+    coordinator.profile_for.return_value = AC300_PROFILE
     return coordinator
 
 
@@ -95,7 +97,8 @@ async def test_turn_on_sends_mqtt_command(mock_coordinator, mock_mqtt_client):
     await switch.async_turn_on()
 
     mock_mqtt_client.send_command.assert_called_once_with(
-        "AC300", "FAKESERIAL001", AC_SWITCH, SWITCH_ON
+        "AC300", "FAKESERIAL001", AC_SWITCH, SWITCH_ON,
+        slave_addr=1, payload_ver=1.0,
     )
 
 
@@ -109,7 +112,8 @@ async def test_turn_off_sends_mqtt_command(mock_coordinator, mock_mqtt_client):
     await switch.async_turn_off()
 
     mock_mqtt_client.send_command.assert_called_once_with(
-        "AC300", "FAKESERIAL001", DC_SWITCH, SWITCH_OFF
+        "AC300", "FAKESERIAL001", DC_SWITCH, SWITCH_OFF,
+        slave_addr=1, payload_ver=1.0,
     )
 
 
@@ -208,24 +212,50 @@ def test_switch_descriptions_have_registers():
 @pytest.mark.asyncio
 async def test_switch_setup_gates_on_controllable():
     """Switches are created only for controllable (mqtt+rest) devices."""
-    from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE, AP300_PROFILE
+    from custom_components.bluetti_cloud.api.profiles import DeviceProfile
     from custom_components.bluetti_cloud.switch import async_setup_entry
 
     coordinator = MagicMock()
     coordinator.data = {}
     coordinator._device_info = {}
     coordinator.profile_for.side_effect = (
-        lambda sn: AC300_PROFILE if "AC300" in sn else AP300_PROFILE
+        lambda sn: AC300_PROFILE if "AC300" in sn else DeviceProfile(
+            model="RO", protocol_ver_min=0, data_path="rest_only")
     )
 
     entry = MagicMock()
     entry.runtime_data = coordinator
-    entry.data = {"devices": ["AC300SN", "AP300SN"]}
+    entry.data = {"devices": ["AC300SN", "ROSN"]}
 
     added: list = []
     with patch("homeassistant.helpers.frame.report_usage"):
         await async_setup_entry(MagicMock(), entry, added.extend)
 
-    # AC300 (controllable) → 2 switches; AP300 (rest_only) → 0
+    # AC300 (controllable) → 2 switches; non-controllable device → 0
     assert len(added) == len(SWITCH_DESCRIPTIONS)
     assert all("AC300" in e._device_sn for e in added)
+
+
+@pytest.mark.asyncio
+async def test_v2_device_uses_v2_registers_and_framing(coordinator_data, mock_mqtt_client):
+    """A V2 device must send 2011/2012 with slave 0 and the 1.2 envelope."""
+    from custom_components.bluetti_cloud.api.profiles import AP300_PROFILE
+
+    coordinator = MagicMock(spec=BluettiCloudCoordinator)
+    coordinator.data = coordinator_data
+    coordinator.last_update_success = True
+    coordinator._device_info = {}
+    coordinator.mqtt_client = mock_mqtt_client
+    coordinator.profile_for.return_value = AP300_PROFILE
+
+    desc = next(d for d in SWITCH_DESCRIPTIONS if d.key == "ac_switch")
+    switch = BluettiCloudSwitch(coordinator, "AC300FAKESERIAL001", desc)
+    switch.async_write_ha_state = MagicMock()
+
+    await switch.async_turn_on()
+
+    # V2 register 2011, not the V1 3007; slave 0; V2 payload envelope.
+    mock_mqtt_client.send_command.assert_called_once_with(
+        "AC300", "FAKESERIAL001", 2011, SWITCH_ON,
+        slave_addr=0, payload_ver=1.2,
+    )

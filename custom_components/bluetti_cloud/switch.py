@@ -116,13 +116,28 @@ class BluettiCloudSwitch(BluettiCloudEntity, SwitchEntity):
             _LOGGER.error("MQTT not connected — cannot send %s command", desc.name)
             raise BluettiMqttError("MQTT not connected")
 
+        # Registers and payload framing are per-model, not global: V1 devices
+        # use 3007/3008 with legacy framing, V2 devices 2011/2012 with the
+        # 01F80F envelope and Modbus slave 0.
+        profile = self.coordinator.profile_for(self._device_sn)
+        register = (
+            profile.ac_switch_reg if desc.key == "ac_switch" else profile.dc_switch_reg
+        )
+        if register is None:
+            _LOGGER.error("%s is not controllable on this device", desc.name)
+            raise BluettiMqttError(f"{desc.name} is not controllable on this device")
+
         try:
-            mqtt.send_command(model, sub_sn, desc.register, value)
+            mqtt.send_command(
+                model, sub_sn, register, value,
+                slave_addr=profile.slave_addr,
+                payload_ver=profile.iot_payload_ver,
+            )
             _LOGGER.info(
                 "Sent %s %s command to %s/%s (reg=%d val=%d)",
                 desc.name,
                 "ON" if value == desc.on_value else "OFF",
-                model, sub_sn, desc.register, value,
+                model, sub_sn, register, value,
             )
         except BluettiMqttError as err:
             _LOGGER.error("MQTT command failed for %s: %s", desc.name, err)

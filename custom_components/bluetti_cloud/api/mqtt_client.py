@@ -33,9 +33,9 @@ import paho.mqtt.client as mqtt
 
 from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
 from .modbus import (
-    build_mqtt_payload,
     build_node_info_query,
     build_read_mqtt_payload,
+    build_switch_payload,
     parse_mqtt_payload,
 )
 from .totp import generate_totp
@@ -490,14 +490,18 @@ class BluettiMqttClient:
             _LOGGER.debug("Subscribed to telemetry topic: %s", topic)
 
     def send_command(
-        self, model: str, sub_sn: str, register: int, value: int
+        self, model: str, sub_sn: str, register: int, value: int,
+        slave_addr: int = 1, payload_ver: float = 1.0,
     ) -> None:
-        """Send a Modbus write command to a device via MQTT."""
+        """Send a guarded output-control write (FC=06) to a device via MQTT.
+
+        Only known control registers may be written — see build_switch_payload.
+        """
         if not self._client or not self._connected:
             raise BluettiMqttError("Not connected to MQTT broker")
 
         topic = f"SUB/{model}/{sub_sn}"
-        payload = build_mqtt_payload(register, value)
+        payload = build_switch_payload(register, value, slave_addr, payload_ver)
 
         _LOGGER.debug(
             "MQTT publish %s: reg=%d val=%d payload=%s",

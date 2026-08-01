@@ -23,10 +23,11 @@ def test_ap300_is_mqtt_rest_poll_driven():
     assert {b.name for b in p.read_blocks} == {
         "home_data", "pack_main_info", "pack_item_info"
     }
-    # Not controllable yet (telemetry-first).
-    assert p.controllable is False
-    assert p.ac_switch_reg is None
-    assert p.dc_switch_reg is None
+    # Controllable via the V2 switch registers (plain 0/1 values).
+    assert p.controllable is True
+    assert p.ac_switch_reg == 2011
+    assert p.dc_switch_reg == 2012
+    assert p.switch_encoding == "simple"
 
 
 def test_ap300_matches_any_protocol_ver():
