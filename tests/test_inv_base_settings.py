@@ -38,3 +38,31 @@ def test_parses_all_on():
 def test_rejects_short_payload():
     # Other register blocks must not be misread as switch state.
     assert parse_inv_base_settings(bytes(10)) == {}
+
+
+def test_parses_eco_settings():
+    """ECO state lives in the same reg-2000 block as the output switches.
+
+    Byte offset = (reg - 2000) * 2, low byte only:
+      2014 DC eco -> 29    2015 hours -> 31    2016 watts -> 33
+      2017 AC eco -> 35    2018 hours -> 37    2019 watts -> 39
+    """
+    data = bytearray(60)
+    data[29] = 1    # DC eco on
+    data[31] = 2    # 2 hours
+    data[33] = 12   # 12 W
+    data[35] = 1    # AC eco on
+    data[37] = 3    # 3 hours
+    data[39] = 25   # 25 W
+    parsed = parse_inv_base_settings(bytes(data))
+    assert parsed["dc_eco"] is True
+    assert parsed["dc_eco_auto_off"] == 2
+    assert parsed["dc_eco_power"] == 12
+    assert parsed["ac_eco"] is True
+    assert parsed["ac_eco_auto_off"] == 3
+    assert parsed["ac_eco_power"] == 25
+
+
+def test_eco_absent_from_short_block():
+    parsed = parse_inv_base_settings(bytes(30))
+    assert "ac_eco" not in parsed

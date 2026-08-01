@@ -1048,11 +1048,22 @@ def parse_inv_base_settings(data: bytes) -> dict[str, Any]:
     """
     if len(data) < 26:
         return {}
-    return {
+    result: dict[str, Any] = {
         "ctrl_inverter": bool(data[21]),
         "ctrl_ac_switch": bool(data[23]),
         "ctrl_dc_switch": bool(data[25]),
     }
+    # ECO settings share this block: byte = (reg - 2000) * 2, low byte only.
+    if len(data) >= 40:
+        result.update({
+            "dc_eco": bool(data[29]),
+            "dc_eco_auto_off": data[31],
+            "dc_eco_power": data[33],
+            "ac_eco": bool(data[35]),
+            "ac_eco_auto_off": data[37],
+            "ac_eco_power": data[39],
+        })
+    return result
 
 
 def parse_pack_item_info_v2(data: bytes) -> dict[str, Any]:
