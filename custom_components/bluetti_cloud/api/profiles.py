@@ -95,8 +95,27 @@ AC300_PROFILE = DeviceProfile(
 )
 
 
+# AP300 (APEX 300): REST-only. protocolVer 2015 uses a newer IoT protocol the
+# current MQTT/Modbus implementation does not speak (discovery 2026-08-01: the
+# device returns no frames to FC=03 reads and pushes nothing unprompted), but
+# its cloud session is online and getDeviceLastAlive fully populates SOC,
+# voltage, power, switch states, and energy over REST. No MQTT, no control.
+AP300_PROFILE = DeviceProfile(
+    model="AP300",
+    protocol_ver_min=0,
+    data_path="rest_only",
+    pushes_telemetry=False,
+    slave_addr=1,
+    read_blocks=(),
+    pack_select_reg=None,
+    ac_switch_reg=None,
+    dc_switch_reg=None,
+    switch_encoding="simple",
+)
+
+
 # Registry of known profiles, most specific first. Extended as models are added.
-_PROFILES: tuple[DeviceProfile, ...] = (AC300_PROFILE,)
+_PROFILES: tuple[DeviceProfile, ...] = (AC300_PROFILE, AP300_PROFILE)
 
 
 def get_profile(model: str, protocol_ver: int) -> DeviceProfile:

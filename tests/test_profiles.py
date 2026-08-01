@@ -2,10 +2,35 @@
 
 from custom_components.bluetti_cloud.api.profiles import (
     AC300_PROFILE,
+    AP300_PROFILE,
     DeviceProfile,
     ReadBlock,
     get_profile,
 )
+
+
+def test_ap300_is_rest_only():
+    # APEX 300 (model code AP300, protocolVer 2015): fully served by REST,
+    # does not speak the current MQTT protocol.
+    p = get_profile("AP300", 2015)
+    assert p is AP300_PROFILE
+    assert p.model == "AP300"
+    assert p.data_path == "rest_only"
+    assert p.pushes_telemetry is False
+    assert p.read_blocks == ()
+    assert p.controllable is False
+    assert p.ac_switch_reg is None
+    assert p.dc_switch_reg is None
+
+
+def test_ap300_matches_any_protocol_ver():
+    # Match on model regardless of the exact reported protocol version.
+    assert get_profile("AP300", 2015) is AP300_PROFILE
+    assert get_profile("AP300", 0) is AP300_PROFILE
+
+
+def test_ac300_stays_mqtt_rest_after_ap300_added():
+    assert get_profile("AC300", 1018).data_path == "mqtt+rest"
 
 
 def test_ac300_profile_shape():
