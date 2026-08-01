@@ -24,13 +24,17 @@ from typing import TYPE_CHECKING, Any
 
 from .api.modbus import (
     AC_SWITCH,
+    AC_SWITCH_V2,
     DC_SWITCH,
+    DC_SWITCH_V2,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
     FUNC_READ_HOLDING,
     FUNC_WRITE_MULTIPLE,
     FUNC_WRITE_SINGLE,
     HOME_DATA,
     HOME_DATA_COUNT,
+    INV_BASE_SETTINGS,
+    INV_BASE_SETTINGS_COUNT,
     IOT_PAYLOAD_VER_V2,
     NODE_INFO,
     PACK_ITEM_INFO,
@@ -41,6 +45,7 @@ from .api.modbus import (
     PACK_SELECT,
     parse_fc16_registers,
     parse_home_data,
+    parse_inv_base_settings,
     parse_node_info,
     parse_pack_item_info,
     parse_pack_item_info_v2,
@@ -82,6 +87,8 @@ _MQTT_SWITCH_MAP = {
 _REGISTER_TO_SWITCH = {
     AC_SWITCH: "ac_switch",
     DC_SWITCH: "dc_switch",
+    AC_SWITCH_V2: "ac_switch",
+    DC_SWITCH_V2: "dc_switch",
 }
 
 
@@ -374,6 +381,14 @@ class BluettiMqttManager:
                             slave_addr=profile.slave_addr,
                             payload_ver=profile.iot_payload_ver,
                         )
+                        # Authoritative AC/DC switch state (the V2 homeData
+                        # ctrl bits do not track it reliably).
+                        await self._poll_register(
+                            sn, model, sub_sn, INV_BASE_SETTINGS,
+                            INV_BASE_SETTINGS_COUNT,
+                            slave_addr=profile.slave_addr,
+                            payload_ver=profile.iot_payload_ver,
+                        )
                         # Enumerate sub-devices (batteries, D1/A1 hubs) via the
                         # NODE_INFO query-write.
                         await self._poll_node_info(
@@ -645,6 +660,21 @@ class BluettiMqttManager:
 
         self._push_mqtt_update()
 
+    def _process_inv_base_settings(self, sn: str, register_data: bytes) -> None:
+        """Store the authoritative AC/DC switch state from reg 2000."""
+        settings = parse_inv_base_settings(register_data)
+        if not settings:
+            return
+        _LOGGER.debug(
+            "MQTT inv base settings for %s: ac=%s dc=%s",
+            sn, settings["ctrl_ac_switch"], settings["ctrl_dc_switch"],
+        )
+        mqtt_overlay = self.overlays.setdefault(sn, {})
+        mqtt_overlay["ac_switch"] = settings["ctrl_ac_switch"]
+        mqtt_overlay["dc_switch"] = settings["ctrl_dc_switch"]
+        mqtt_overlay["mqtt_active"] = True
+        self._push_mqtt_update()
+
     def _process_pack_item_v2(
         self, sn: str, register_data: bytes, slave_addr: int
     ) -> None:
@@ -691,7 +721,9 @@ class BluettiMqttManager:
         if register == PACK_ITEM_INFO and slave_addr >= 41:
             self._process_pack_item_v2(sn, register_data, slave_addr)
             return
-        if register == HOME_DATA:
+        if register == INV_BASE_SETTINGS:
+            self._process_inv_base_settings(sn, register_data)
+        elif register == HOME_DATA:
             self._process_home_data(sn, register_data)
         elif register == PACK_MAIN_INFO:
             self._process_pack_main_info(sn, register_data)

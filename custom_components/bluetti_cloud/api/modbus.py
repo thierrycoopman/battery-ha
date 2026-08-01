@@ -34,6 +34,8 @@ HOME_DATA = 100          # Aggregate SOC, V/I, charging status, switch states
 PACK_MAIN_INFO = 6000    # Battery summary: total V/I/SOC/SOH, temp, charge times
 PACK_ITEM_INFO = 6100    # Per-battery pack: V, I, SOC, SOH, temp, status
 NODE_INFO = 21000        # V2 sub-device (mesh node) registry — see build_node_info_query
+INV_BASE_SETTINGS = 2000  # V2 inverter base settings — authoritative AC/DC switch state
+INV_BASE_SETTINGS_COUNT = 30  # 60 bytes
 
 # Register counts for FC=03 reads (number of 16-bit registers)
 HOME_DATA_COUNT = 62         # 124 bytes
@@ -775,6 +777,27 @@ def parse_pack_main_info(data: bytes) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # PackItemInfo parser — register 6100 (ProtocolParserV2.java:parsePackItemInfo)
 # ---------------------------------------------------------------------------
+
+def parse_inv_base_settings(data: bytes) -> dict[str, Any]:
+    """Parse V2 inverter base settings (reg 2000) — authoritative switch state.
+
+    The V2 homeData ctrl bits do not track output state reliably; this block is
+    what the app itself reads back. Byte offsets into the Modbus data payload:
+        [21] ctrl inverter   [23] ctrl AC   [25] ctrl DC   (each 0 or 1)
+
+    Verified live: writing 1 to reg 2011 flips [23] from 0 to 1.
+
+    Returns an empty dict for payloads too short to be this block, so a
+    different register's response is never misread as switch state.
+    """
+    if len(data) < 26:
+        return {}
+    return {
+        "ctrl_inverter": bool(data[21]),
+        "ctrl_ac_switch": bool(data[23]),
+        "ctrl_dc_switch": bool(data[25]),
+    }
+
 
 def parse_pack_item_info_v2(data: bytes) -> dict[str, Any]:
     """Parse a V2 (protocolVer >= 2000) per-pack record from reg 6100.
