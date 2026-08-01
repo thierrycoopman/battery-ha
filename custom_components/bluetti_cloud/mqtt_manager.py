@@ -122,6 +122,9 @@ class BluettiMqttManager:
         self._fc16_devices: set[str] = set()
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
+        # Sub-device (NODE_INFO) discovery: seen node slave addrs + callbacks
+        self._discovered_nodes: dict[str, set[int]] = {}
+        self._node_callbacks: list[Callable[[str, list[dict[str, Any]]], None]] = []
         # Registers that returned Modbus errors — skip in future polls
         # Key: sn, Value: set of (register, slave_addr) tuples
         self._unsupported_registers: dict[str, set[tuple[int, int]]] = {}
@@ -152,6 +155,19 @@ class BluettiMqttManager:
         Callback signature: (device_sn: str, pack_count: int) -> None
         """
         self._new_pack_callbacks.append(callback)
+
+    def register_node_callback(
+        self, callback: Callable[[str, list[dict[str, Any]]], None]
+    ) -> None:
+        """Register a callback for when new sub-device nodes are discovered.
+
+        Callback signature: (device_sn: str, nodes: list[dict]) -> None
+        """
+        self._node_callbacks.append(callback)
+
+    def get_nodes(self, sn: str) -> list[dict[str, Any]]:
+        """Return the last known sub-device node list for a device."""
+        return self.overlays.get(sn, {}).get("nodes", [])
 
     # -- MQTT lifecycle --
 
@@ -592,6 +608,18 @@ class BluettiMqttManager:
         mqtt_overlay = self.overlays.setdefault(sn, {})
         mqtt_overlay["nodes"] = nodes
         mqtt_overlay["mqtt_active"] = True
+
+        # Notify listeners when previously-unseen nodes appear (dynamic entities)
+        seen = self._discovered_nodes.setdefault(sn, set())
+        new_addrs = {n["slave_addr"] for n in nodes} - seen
+        if new_addrs:
+            seen |= new_addrs
+            for cb in self._node_callbacks:
+                try:
+                    cb(sn, nodes)
+                except Exception:
+                    _LOGGER.exception("Error in node discovery callback")
+
         self._push_mqtt_update()
 
     def _route_register_data(

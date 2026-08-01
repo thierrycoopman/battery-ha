@@ -55,3 +55,42 @@ async def test_mqtt_device_gets_no_output_state_sensors():
     assert len(added) == len(BINARY_SENSOR_DESCRIPTIONS)
     keys = {e.entity_description.key for e in added}
     assert "ac_output_state" not in keys
+
+
+@pytest.mark.asyncio
+async def test_node_binary_sensors_created_from_node_list():
+    """Sub-device nodes become connectivity binary sensors."""
+    from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE
+    from custom_components.bluetti_cloud.binary_sensor import (
+        BluettiCloudNodeBinarySensor,
+    )
+
+    nodes = [
+        {"slave_addr": 0, "model": 6, "model_name": "AP300", "is_battery": False,
+         "online": True, "warning": False, "error": False, "sn": "aa"},
+        {"slave_addr": 11, "model": 3007, "model_name": "D1 Hub (HD1)",
+         "is_battery": False, "online": True, "warning": False, "error": False, "sn": "bb"},
+        {"slave_addr": 51, "model": 4005, "model_name": "Battery", "is_battery": True,
+         "online": True, "warning": False, "error": False, "sn": "cc"},
+    ]
+    coordinator = MagicMock()
+    coordinator.data = {"SN": {"nodes": nodes}}
+    coordinator._device_info = {}
+    coordinator.profile_for.return_value = AC300_PROFILE  # controllable → no output sensors
+    coordinator.get_nodes.return_value = nodes
+
+    entry = MagicMock()
+    entry.runtime_data = coordinator
+    entry.data = {"devices": ["SN"]}
+
+    added: list = []
+    with patch("homeassistant.helpers.frame.report_usage"):
+        await async_setup_entry(MagicMock(), entry, added.extend)
+
+    node_sensors = [e for e in added if isinstance(e, BluettiCloudNodeBinarySensor)]
+    assert len(node_sensors) == 3
+    battery = next(e for e in node_sensors if e._slave_addr == 51)
+    assert battery.is_on is True
+    assert battery.extra_state_attributes["is_battery"] is True
+    hub = next(e for e in node_sensors if e._slave_addr == 11)
+    assert hub.extra_state_attributes["model"] == "D1 Hub (HD1)"
