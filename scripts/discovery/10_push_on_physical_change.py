@@ -25,7 +25,7 @@ from bluetti_cloud.api.modbus import (
 from bluetti_cloud.api.mqtt_client import BluettiMqttClient, BluettiMqttError
 
 MODEL, SUB = "AP300", "2616113487436"
-LISTEN_SECONDS = 120
+LISTEN_SECONDS = 180
 
 _t0 = 0.0
 _frames: list[tuple[float, int, int | None]] = []
