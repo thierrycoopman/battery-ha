@@ -82,7 +82,7 @@ async def main() -> None:
             fc = parsed.get("function_code")
             if fc and fc & 0x80:
                 continue
-            for name, reg, count, parser in READS:
+            for name, _reg, count, parser in READS:
                 if len(data) == count * 2:
                     try:
                         print(f"[{name} len={len(data)}]", parser(data))

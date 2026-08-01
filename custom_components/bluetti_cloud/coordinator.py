@@ -26,10 +26,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api.client import BluettiCloudApi, BluettiCloudApiError
 from .api.modbus import (
     AC_SWITCH,
-    BATTERY_STATE_MAP,
     DC_SWITCH,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
-    FUNC_ERROR_MASK,
     FUNC_READ_HOLDING,
     FUNC_WRITE_MULTIPLE,
     FUNC_WRITE_SINGLE,
@@ -224,7 +222,11 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     @property
     def mqtt_connected(self) -> bool:
-        return self._mqtt_connected and self._mqtt_client is not None and self._mqtt_client.is_connected
+        return (
+            self._mqtt_connected
+            and self._mqtt_client is not None
+            and self._mqtt_client.is_connected
+        )
 
     def get_pack_count(self, sn: str) -> int:
         """Return the discovered pack count for a device."""
@@ -462,7 +464,7 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             await asyncio.wait_for(
                 self._response_event.wait(), timeout=MQTT_REQUEST_TIMEOUT
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.debug(
                 "Timeout waiting for response: %s reg=%d slave=%d",
                 sn, register, slave_addr,
@@ -818,7 +820,6 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             # Update pack_count based on actually connected packs
             connected_count = len(discovered)
             if connected_count != self._pack_counts.get(sn, 0):
-                old_count = self._pack_counts.get(sn, 0)
                 self._pack_counts[sn] = connected_count
                 if was_new:
                     _LOGGER.info(
