@@ -34,10 +34,16 @@ from .api.modbus import (
     FUNC_WRITE_SINGLE,
     HOME_DATA,
     HOME_DATA_COUNT,
+    INV_BASE_INFO,
     INV_BASE_SETTINGS,
     INV_BASE_SETTINGS_COUNT,
+    INV_GRID_INFO,
+    INV_INV_INFO,
+    INV_LOAD_INFO,
+    INV_PV_INFO,
     IOT_PAYLOAD_VER_V2,
     NODE_INFO,
+    PACK_CELL_INFO,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT,
     PACK_ITEM_INFO_COUNT_V2,
@@ -46,8 +52,14 @@ from .api.modbus import (
     PACK_SELECT,
     parse_fc16_registers,
     parse_home_data,
+    parse_inv_base_info,
     parse_inv_base_settings,
+    parse_inv_grid_info,
+    parse_inv_inv_info,
+    parse_inv_load_info,
+    parse_inv_pv_info,
     parse_node_info,
+    parse_pack_cells,
     parse_pack_item_info,
     parse_pack_item_info_v2,
     parse_pack_main_info,
@@ -86,6 +98,16 @@ _MQTT_SWITCH_MAP = {
 }
 
 # Register address to switch data key (for FC=06 write echo)
+# Telemetry blocks the device pushes, and the parser for each.
+_BLOCK_PARSERS = {
+    INV_BASE_INFO: parse_inv_base_info,
+    INV_PV_INFO: parse_inv_pv_info,
+    INV_GRID_INFO: parse_inv_grid_info,
+    INV_LOAD_INFO: parse_inv_load_info,
+    INV_INV_INFO: parse_inv_inv_info,
+    PACK_CELL_INFO: parse_pack_cells,
+}
+
 _REGISTER_TO_SWITCH = {
     AC_SWITCH: "ac_switch",
     DC_SWITCH: "dc_switch",
@@ -688,6 +710,17 @@ class BluettiMqttManager:
         last = self._last_push.get(sn)
         return last is not None and (time.monotonic() - last) < PUSH_ACTIVE_WINDOW
 
+    def _process_block(self, sn: str, register: int, parser, data: bytes) -> None:
+        """Parse a telemetry block and merge its fields into the overlay."""
+        fields = parser(data)
+        if not fields:
+            return
+        _LOGGER.debug("MQTT block %d for %s: %d fields", register, sn, len(fields))
+        overlay = self.overlays.setdefault(sn, {})
+        overlay.update(fields)
+        overlay["mqtt_active"] = True
+        self._push_mqtt_update()
+
     def _process_inv_base_settings(self, sn: str, register_data: bytes) -> None:
         """Store the authoritative AC/DC switch state from reg 2000."""
         settings = parse_inv_base_settings(register_data)
@@ -749,7 +782,10 @@ class BluettiMqttManager:
         if register == PACK_ITEM_INFO and slave_addr >= 41:
             self._process_pack_item_v2(sn, register_data, slave_addr)
             return
-        if register == INV_BASE_SETTINGS:
+        block_parser = _BLOCK_PARSERS.get(register)
+        if block_parser is not None:
+            self._process_block(sn, register, block_parser, register_data)
+        elif register == INV_BASE_SETTINGS:
             self._process_inv_base_settings(sn, register_data)
         elif register == HOME_DATA:
             self._process_home_data(sn, register_data)

@@ -16,7 +16,9 @@ from homeassistant.const import (
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
+    UnitOfFrequency,
     UnitOfPower,
+    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -136,6 +138,96 @@ SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
     ),
 ]
 
+# V2 telemetry sensors, populated from the blocks the device pushes.
+# Created only for devices on the V2 protocol.
+V2_SENSOR_DESCRIPTIONS: list[BluettiSensorDescription] = [
+    BluettiSensorDescription(
+        key="ambient_temp", data_key="ambient_temp", name="Ambient Temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+    ),
+    BluettiSensorDescription(
+        key="inverter_temp", data_key="inverter_temp", name="Inverter Temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+    ),
+    BluettiSensorDescription(
+        key="pv_dcdc_temp", data_key="pv_dcdc_temp", name="PV Converter Temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+    ),
+    BluettiSensorDescription(
+        key="grid_frequency", data_key="grid_frequency", name="Grid Frequency",
+        device_class=SensorDeviceClass.FREQUENCY,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+    ),
+    BluettiSensorDescription(
+        key="grid_import_energy", data_key="grid_import_energy",
+        name="Grid Import Energy",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    ),
+    BluettiSensorDescription(
+        key="grid_export_energy", data_key="grid_export_energy",
+        name="Grid Export Energy",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    ),
+    BluettiSensorDescription(
+        key="pv_total_energy", data_key="pv_total_energy", name="PV Total Energy",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    ),
+    BluettiSensorDescription(
+        key="ac_load_power", data_key="ac_load_power", name="AC Load Power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+    ),
+    BluettiSensorDescription(
+        key="dc_load_power", data_key="dc_load_power", name="DC Load Power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+    ),
+    BluettiSensorDescription(
+        key="inverter_frequency", data_key="inverter_frequency",
+        name="Inverter Frequency",
+        device_class=SensorDeviceClass.FREQUENCY,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+    ),
+    BluettiSensorDescription(
+        key="cell_voltage_min", data_key="cell_voltage_min", name="Cell Voltage Min",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        entity_registry_enabled_default=False,
+    ),
+    BluettiSensorDescription(
+        key="cell_voltage_max", data_key="cell_voltage_max", name="Cell Voltage Max",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        entity_registry_enabled_default=False,
+    ),
+    BluettiSensorDescription(
+        key="cell_voltage_delta", data_key="cell_voltage_delta",
+        name="Cell Voltage Delta",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        icon="mdi:scale-balance",
+    ),
+]
+
 # Battery aggregate sensors (from FC=16 registers 92-93 and reg 43)
 PACK_SUMMARY_DESCRIPTIONS: list[BluettiSensorDescription] = [
     BluettiSensorDescription(
@@ -215,7 +307,12 @@ async def async_setup_entry(
         # PackMainInfo. REST-only devices (e.g. AP300) report only aggregate
         # voltage over REST (no aggregate current), so skip the current sensor
         # rather than create a permanently-unavailable entity.
-        rest_only = coordinator.profile_for(sn).data_path == "rest_only"
+        profile = coordinator.profile_for(sn)
+        if profile.iot_payload_ver >= 1.1:
+            for description in V2_SENSOR_DESCRIPTIONS:
+                entities.append(BluettiCloudSensor(coordinator, sn, description))
+
+        rest_only = profile.data_path == "rest_only"
         for description in PACK_SUMMARY_DESCRIPTIONS:
             if rest_only and description.data_key != "pack_total_voltage":
                 continue
