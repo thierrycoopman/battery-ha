@@ -1,16 +1,16 @@
 """Tests for Bluetti Cloud switch platform (MQTT-based control)."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from custom_components.bluetti_cloud.api.modbus import AC_SWITCH, DC_SWITCH, SWITCH_OFF, SWITCH_ON
+from custom_components.bluetti_cloud.api.mqtt_client import BluettiMqttError
+from custom_components.bluetti_cloud.coordinator import BluettiCloudCoordinator
 from custom_components.bluetti_cloud.switch import (
     SWITCH_DESCRIPTIONS,
     BluettiCloudSwitch,
 )
-from custom_components.bluetti_cloud.api.modbus import AC_SWITCH, DC_SWITCH, SWITCH_ON, SWITCH_OFF
-from custom_components.bluetti_cloud.api.mqtt_client import BluettiMqttError
-from custom_components.bluetti_cloud.coordinator import BluettiCloudCoordinator
 
 
 @pytest.fixture
@@ -203,3 +203,29 @@ def test_switch_descriptions_have_registers():
         assert desc.key
         assert desc.on_value is not None
         assert desc.off_value is not None
+
+
+@pytest.mark.asyncio
+async def test_switch_setup_gates_on_controllable():
+    """Switches are created only for controllable (mqtt+rest) devices."""
+    from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE, AP300_PROFILE
+    from custom_components.bluetti_cloud.switch import async_setup_entry
+
+    coordinator = MagicMock()
+    coordinator.data = {}
+    coordinator._device_info = {}
+    coordinator.profile_for.side_effect = (
+        lambda sn: AC300_PROFILE if "AC300" in sn else AP300_PROFILE
+    )
+
+    entry = MagicMock()
+    entry.runtime_data = coordinator
+    entry.data = {"devices": ["AC300SN", "AP300SN"]}
+
+    added: list = []
+    with patch("homeassistant.helpers.frame.report_usage"):
+        await async_setup_entry(MagicMock(), entry, added.extend)
+
+    # AC300 (controllable) → 2 switches; AP300 (rest_only) → 0
+    assert len(added) == len(SWITCH_DESCRIPTIONS)
+    assert all("AC300" in e._device_sn for e in added)

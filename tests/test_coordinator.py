@@ -245,6 +245,7 @@ async def test_mqtt_disconnect_restores_rest_interval(
 ):
     """Test that REST interval is restored and reconnection is scheduled when MQTT disconnects."""
     from datetime import timedelta
+
     from custom_components.bluetti_cloud.const import DEFAULT_SCAN_INTERVAL
 
     coordinator = _make_coordinator(
@@ -311,3 +312,5 @@ async def test_ap300_rest_only_maps_voltage_and_charging(
     # Switch states readable (but not controllable)
     assert dev["ac_switch"] is False
     assert dev["dc_switch"] is False
+    # iotSession "1" from the API normalizes to "Online"
+    assert dev["iot_session"] == "Online"

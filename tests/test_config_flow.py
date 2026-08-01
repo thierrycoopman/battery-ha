@@ -4,8 +4,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.bluetti_cloud.const import DOMAIN
-
 
 @pytest.fixture
 def mock_client():

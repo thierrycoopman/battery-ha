@@ -4,16 +4,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from custom_components.bluetti_cloud.sensor import (
-    PACK_SUMMARY_DESCRIPTIONS,
-    SENSOR_DESCRIPTIONS,
-    BluettiCloudSensor,
-)
 from custom_components.bluetti_cloud.binary_sensor import (
     BINARY_SENSOR_DESCRIPTIONS,
     BluettiCloudBinarySensor,
 )
 from custom_components.bluetti_cloud.coordinator import BluettiCloudCoordinator
+from custom_components.bluetti_cloud.sensor import (
+    PACK_SUMMARY_DESCRIPTIONS,
+    SENSOR_DESCRIPTIONS,
+    BluettiCloudSensor,
+)
 
 
 @pytest.fixture
@@ -137,7 +137,7 @@ def test_sensor_returns_none_when_no_data(mock_coordinator):
 def test_all_sensor_descriptions_have_required_fields():
     """Verify all sensor descriptions have essential attributes."""
     for desc in SENSOR_DESCRIPTIONS:
-        assert desc.key, f"Missing key on sensor description"
+        assert desc.key, "Missing key on sensor description"
         assert desc.data_key, f"Missing data_key on {desc.key}"
         assert desc.name, f"Missing name on {desc.key}"
         # charging_status has no device_class or unit (it's a string sensor)

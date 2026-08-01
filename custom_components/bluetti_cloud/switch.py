@@ -65,6 +65,10 @@ async def async_setup_entry(
 
     entities: list[BluettiCloudSwitch] = []
     for sn in entry.data.get("devices", []):
+        # Only devices controllable over MQTT get switch entities. REST-only
+        # devices (e.g. AP300) expose output state via read-only binary sensors.
+        if not coordinator.profile_for(sn).controllable:
+            continue
         for description in SWITCH_DESCRIPTIONS:
             entities.append(BluettiCloudSwitch(coordinator, sn, description))
 

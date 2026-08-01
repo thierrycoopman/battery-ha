@@ -66,6 +66,19 @@ def _is_on(value: Any) -> bool | None:
     return str(value) not in ("0", "", "false", "False", "None")
 
 
+def _normalize_iot_session(value: Any) -> str | None:
+    """Normalize the API's iotSession field to "Online"/"Offline"/None.
+
+    The AC300 reports "Online"/null; the AP300 reports "1". Both indicate the
+    device's cloud IoT session state, so map any online indicator to "Online".
+    """
+    if value is None or value == "":
+        return None
+    if str(value).lower() in ("1", "online", "true"):
+        return "Online"
+    return "Offline"
+
+
 class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Coordinator that combines MQTT telemetry with REST API polling.
 
@@ -266,7 +279,9 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             is_online = (
                 session_state.lower() == "online" if session_state else False
             )
-            iot_session = last_alive_embedded.get("iotSession")
+            iot_session = _normalize_iot_session(
+                last_alive_embedded.get("iotSession")
+            )
 
             device_data: dict[str, Any] = {
                 "online": is_online,
@@ -354,7 +369,7 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     if ts:
                         device_data["last_update"] = ts
 
-                    iot = alive_data.get("iotSession")
+                    iot = _normalize_iot_session(alive_data.get("iotSession"))
                     if iot:
                         device_data["iot_session"] = iot
 
