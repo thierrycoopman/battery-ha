@@ -118,8 +118,15 @@ class BluettiCloudNumber(BluettiCloudEntity, NumberEntity):
 
     @property
     def native_value(self) -> float | None:
+        """Device-reported value, falling back to the last value we set.
+
+        The device echoes settings back in its next state push; until then the
+        optimistic value keeps the UI from snapping back.
+        """
         value = self.device_data.get(self.entity_description.data_key)
-        return float(value) if value is not None else None
+        if value is not None:
+            return float(value)
+        return self._attr_native_value
 
     async def async_set_native_value(self, value: float) -> None:
         """Write the setting to the device."""

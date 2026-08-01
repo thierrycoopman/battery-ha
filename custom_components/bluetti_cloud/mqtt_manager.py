@@ -34,6 +34,8 @@ from .api.modbus import (
     FUNC_WRITE_SINGLE,
     HOME_DATA,
     HOME_DATA_COUNT,
+    INV_ADV_SETTINGS,
+    INV_ADV_SETTINGS_COUNT,
     INV_BASE_INFO,
     INV_BASE_SETTINGS,
     INV_BASE_SETTINGS_COUNT,
@@ -49,9 +51,9 @@ from .api.modbus import (
     PACK_ITEM_INFO_COUNT_V2,
     PACK_MAIN_INFO,
     PACK_MAIN_INFO_COUNT,
-    PACK_SELECT,
     parse_fc16_registers,
     parse_home_data,
+    parse_inv_adv_settings,
     parse_inv_base_info,
     parse_inv_base_settings,
     parse_inv_grid_info,
@@ -107,6 +109,7 @@ _UNSOLICITED_BY_LENGTH = {
 
 # Telemetry blocks the device pushes, and the parser for each.
 _BLOCK_PARSERS = {
+    INV_ADV_SETTINGS: parse_inv_adv_settings,
     INV_BASE_INFO: parse_inv_base_info,
     INV_PV_INFO: parse_inv_pv_info,
     INV_GRID_INFO: parse_inv_grid_info,
@@ -431,6 +434,13 @@ class BluettiMqttManager:
                             slave_addr=profile.slave_addr,
                             payload_ver=profile.iot_payload_ver,
                         )
+                        # Grid charging / feed-in state.
+                        await self._poll_register(
+                            sn, model, sub_sn, INV_ADV_SETTINGS,
+                            INV_ADV_SETTINGS_COUNT,
+                            slave_addr=profile.slave_addr,
+                            payload_ver=profile.iot_payload_ver,
+                        )
                         # Enumerate sub-devices (batteries, D1/A1 hubs) via the
                         # NODE_INFO query-write.
                         await self._poll_node_info(
@@ -749,6 +759,9 @@ class BluettiMqttManager:
             sn, settings["ctrl_ac_switch"], settings["ctrl_dc_switch"],
         )
         mqtt_overlay = self.overlays.setdefault(sn, {})
+        # Carry every parsed field through (ECO state lives in this block too),
+        # then alias the switch states to the keys the entities read.
+        mqtt_overlay.update(settings)
         mqtt_overlay["ac_switch"] = settings["ctrl_ac_switch"]
         mqtt_overlay["dc_switch"] = settings["ctrl_dc_switch"]
         mqtt_overlay["mqtt_active"] = True
@@ -852,7 +865,15 @@ class BluettiMqttManager:
             if field in home_data:
                 mqtt_overlay[field] = home_data[field]
 
+        # On V2 devices the homeData ctrl bits do NOT track output state (that
+        # is why INV_BASE_SETTINGS exists), so letting them write ac/dc_switch
+        # here would clobber the authoritative value and flip the UI back.
+        is_v2 = (
+            self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2
+        )
         for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
+            if is_v2 and switch_key in ("ac_switch", "dc_switch"):
+                continue
             if ctrl_key in home_data:
                 mqtt_overlay[switch_key] = home_data[ctrl_key]
 
@@ -1074,10 +1095,12 @@ class BluettiMqttManager:
         if not model or not sub_sn:
             return
         try:
-            self._mqtt_client.send_command(model, sub_sn, PACK_SELECT, pack_num)
+            self._mqtt_client.send_pack_select(model, sub_sn, pack_num)
             _LOGGER.debug("Pack select: %s → pack %d", sn, pack_num)
-        except BluettiMqttError:
-            _LOGGER.debug("Failed to send pack select for %s", sn)
+        except (BluettiMqttError, ValueError):
+            # A rejected pack-select must not abort the telemetry push that
+            # triggered it.
+            _LOGGER.debug("Failed to send pack select for %s", sn, exc_info=True)
 
     def _handle_write_echo(self, sn: str, parsed: dict) -> None:
         """Process FC=06 write echo (switch command confirmation)."""

@@ -61,6 +61,8 @@ PACK_ITEM_INFO = 6100    # Per-battery pack: V, I, SOC, SOH, temp, status
 NODE_INFO = 21000        # V2 sub-device (mesh node) registry — see build_node_info_query
 INV_BASE_SETTINGS = 2000  # V2 inverter base settings — authoritative AC/DC switch state
 INV_BASE_SETTINGS_COUNT = 30  # 60 bytes
+INV_ADV_SETTINGS = 2200   # V2 advanced settings — grid charging / feed-in state
+INV_ADV_SETTINGS_COUNT = 20  # 40 bytes, covers 2200-2219
 
 # Register counts for FC=03 reads (number of 16-bit registers)
 HOME_DATA_COUNT = 62         # 124 bytes
@@ -317,6 +319,30 @@ def build_switch_payload(
     if value not in (SWITCH_OFF, SWITCH_ON):
         raise ValueError(f"invalid switch value {value}: expected 0 or 1")
     return build_mqtt_payload(register, value, slave_addr, payload_ver)
+
+
+MAX_PACKS = 8  # generous upper bound for pack-select validation
+
+
+def build_pack_select_payload(
+    pack_num: int,
+    slave_addr: int,
+    payload_ver: float,
+) -> bytes:
+    """Build a pack-select write (V1 pack cycling).
+
+    This selects which battery pack reports in the shared registers; it is not
+    an output-control write, so it deliberately does not go through the switch
+    guard (whose values are restricted to 0/1).
+
+    Raises:
+        ValueError: if the pack number is outside 1..MAX_PACKS.
+    """
+    if not 1 <= pack_num <= MAX_PACKS:
+        raise ValueError(
+            f"pack number {pack_num} out of range (1-{MAX_PACKS})"
+        )
+    return build_mqtt_payload(PACK_SELECT, pack_num, slave_addr, payload_ver)
 
 
 def build_read_command(
@@ -1034,6 +1060,21 @@ def parse_pack_cells(data: bytes) -> dict[str, Any]:
     return result
 
 
+def parse_inv_adv_settings(data: bytes) -> dict[str, Any]:
+    """Parse V2 advanced settings (reg 2200) — grid charging and feed-in.
+
+    Byte offset = (reg - 2200) * 2, low byte only:
+        2207 grid charging enable -> byte 15
+        2208 feed-in enable       -> byte 17
+    """
+    if len(data) < 18:
+        return {}
+    return {
+        "grid_charge": bool(data[15]),
+        "feed_in": bool(data[17]),
+    }
+
+
 def parse_inv_base_settings(data: bytes) -> dict[str, Any]:
     """Parse V2 inverter base settings (reg 2000) — authoritative switch state.
 
@@ -1053,6 +1094,9 @@ def parse_inv_base_settings(data: bytes) -> dict[str, Any]:
         "ctrl_ac_switch": bool(data[23]),
         "ctrl_dc_switch": bool(data[25]),
     }
+    # Charging mode shares this block: reg 2020 -> byte 41 (low byte).
+    if len(data) >= 42:
+        result["charging_mode_setting"] = CHARGING_MODES.get(data[41])
     # ECO settings share this block: byte = (reg - 2000) * 2, low byte only.
     if len(data) >= 40:
         result.update({

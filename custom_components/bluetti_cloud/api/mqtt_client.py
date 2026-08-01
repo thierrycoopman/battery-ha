@@ -34,6 +34,7 @@ import paho.mqtt.client as mqtt
 from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
 from .modbus import (
     build_node_info_query,
+    build_pack_select_payload,
     build_read_mqtt_payload,
     build_setting_payload,
     build_switch_payload,
@@ -535,6 +536,23 @@ class BluettiMqttClient:
             topic, register, count, slave_addr, payload_ver, payload.hex(),
         )
 
+        result = self._client.publish(topic, payload, qos=1)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise BluettiMqttError(
+                f"MQTT publish failed: {mqtt.error_string(result.rc)}"
+            )
+
+    def send_pack_select(
+        self, model: str, sub_sn: str, pack_num: int,
+        slave_addr: int = 1, payload_ver: float = 1.0,
+    ) -> None:
+        """Select which battery pack reports (V1 pack cycling)."""
+        if not self._client or not self._connected:
+            raise BluettiMqttError("Not connected to MQTT broker")
+
+        topic = f"SUB/{model}/{sub_sn}"
+        payload = build_pack_select_payload(pack_num, slave_addr, payload_ver)
+        _LOGGER.debug("MQTT pack select %s: pack=%d", topic, pack_num)
         result = self._client.publish(topic, payload, qos=1)
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise BluettiMqttError(

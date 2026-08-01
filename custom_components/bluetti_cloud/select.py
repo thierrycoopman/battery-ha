@@ -72,7 +72,9 @@ class BluettiChargingModeSelect(BluettiCloudEntity, SelectEntity):
 
     @property
     def current_option(self) -> str | None:
-        return self.device_data.get(self.entity_description.data_key)
+        """Device-reported mode, falling back to the last mode we selected."""
+        value = self.device_data.get(self.entity_description.data_key)
+        return value if value is not None else self._attr_current_option
 
     async def async_select_option(self, option: str) -> None:
         """Write the selected charging mode to the device."""

@@ -148,7 +148,9 @@ class BluettiCloudSwitch(BluettiCloudEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return self.device_data.get(self.entity_description.data_key)
+        """Device-reported state, falling back to the last state we set."""
+        value = self.device_data.get(self.entity_description.data_key)
+        return value if value is not None else self._attr_is_on
 
     async def _send_switch_command(self, value: int) -> None:
         """Send a switch command via the coordinator's MQTT client."""
