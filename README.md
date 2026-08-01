@@ -26,23 +26,25 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 | Device | Data path | MQTT Telemetry | AC/DC Control | Per-Pack Sensors | Tested |
 |--------|:---------:|:--------------:|:-------------:|:----------------:|:------:|
 | **AC300 + B300** | MQTT + REST | Yes (FC=16 push) | Yes | Yes (up to 4 packs) | **Tested** |
-| **APEX 300 (AP300)** | REST-only | No¹ | No¹ | No² | **Tested (monitoring)** |
+| **APEX 300 (AP300)** | MQTT + REST | Yes (V2 poll)¹ | No¹ | Count only² | **Tested (telemetry)** |
 | AC200, AC200P, AC200L, AC200MAX | MQTT + REST | Likely (V2 polling) | Likely | Likely | Untested |
 | AC500 | MQTT + REST | Likely | Likely | Likely | Untested |
 | AC180, AC60 | MQTT + REST | Likely | Likely | Unknown | Untested |
 | EP500, EP500Pro, EP600 | MQTT + REST | Likely | Likely | Likely | Untested |
 | EB3A, EB55, EB70 | MQTT + REST | Likely | Likely | N/A (internal battery) | Untested |
 
-> ¹ The APEX 300 (cloud model code `AP300`, protocol version 2015) is **fully
-> monitorable over the cloud REST API** but uses a newer IoT protocol that this
-> integration's MQTT layer does not yet speak. It therefore gets **REST-only
-> monitoring** (~30–60s refresh) with **no real-time push and no output
-> control**. Its AC/DC/PV/grid outputs appear as **read-only binary sensors**
-> (state only). MQTT control is a planned follow-up.
+> ¹ The APEX 300 (cloud model code `AP300`, protocol version 2015) uses the
+> 2nd-generation IoT protocol (`iotPayloadVer` 1.2 — a `01 F8 0F …` envelope,
+> Modbus slave 0). As of v0.7.0 it has **real-time MQTT telemetry** (SOC,
+> battery voltage, charging status, output states; ~10s refresh) layered on REST
+> for power/energy. **Output control is not yet implemented** — AC/DC/PV/grid
+> outputs appear as **read-only binary sensors** (state only). Control (V2
+> switch registers) is a planned follow-up.
 >
-> ² The cloud reports the APEX 300's internal + external batteries as a single
-> logical high-voltage stack (one aggregate SOC and voltage), so no per-pack
-> sensors are available over REST.
+> ² The device reports a battery **count** (surfaced via telemetry), but
+> individual per-battery detail for its multi-battery / hub topology (up to 6
+> batteries plus additions like the D1 hub / A1) is still being reverse-
+> engineered (via the device's `NODE_INFO` sub-device registry).
 
 **Any Bluetti device that appears in the Bluetti mobile app should work in principle.** The integration uses the same cloud API and MQTT protocol as the app. However, different models may use different protocol versions, register layouts, or Modbus function codes. The only configuration tested and confirmed working is the **AC300 with 2x B300 battery packs**.
 

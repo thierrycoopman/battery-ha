@@ -9,15 +9,21 @@ from custom_components.bluetti_cloud.api.profiles import (
 )
 
 
-def test_ap300_is_rest_only():
-    # APEX 300 (model code AP300, protocolVer 2015): fully served by REST,
-    # does not speak the current MQTT protocol.
+def test_ap300_is_mqtt_rest_poll_driven():
+    # APEX 300 (model code AP300, protocolVer 2015): MQTT+REST, poll-driven,
+    # 2nd-gen IoT (slave 0, iotPayloadVer 1.2). Telemetry only for now —
+    # control (switch registers) is added in a later step.
     p = get_profile("AP300", 2015)
     assert p is AP300_PROFILE
     assert p.model == "AP300"
-    assert p.data_path == "rest_only"
+    assert p.data_path == "mqtt+rest"
     assert p.pushes_telemetry is False
-    assert p.read_blocks == ()
+    assert p.slave_addr == 0
+    assert p.iot_payload_ver == 1.2
+    assert {b.name for b in p.read_blocks} == {
+        "home_data", "pack_main_info", "pack_item_info"
+    }
+    # Not controllable yet (telemetry-first).
     assert p.controllable is False
     assert p.ac_switch_reg is None
     assert p.dc_switch_reg is None
