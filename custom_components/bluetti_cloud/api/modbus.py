@@ -50,6 +50,58 @@ EXCEPTION_ILLEGAL_DATA_VALUE = 0x03
 DEFAULT_SLAVE_ADDR = 1
 
 
+# ---------------------------------------------------------------------------
+# Shared payload-encoding conventions
+# ---------------------------------------------------------------------------
+#
+# Bluetti's parsers apply a few house conventions consistently across payloads
+# (ported from the app's ProtocolParse/ProtocolParserV2 helpers):
+#   - ASCII fields are byte-swapped WITHIN each 16-bit register (lo then hi),
+#     so raw "PA03" is really "AP300" and raw "3B00" is "B300".
+#   - Serial numbers concatenate registers in REVERSE order, then render the
+#     resulting u64 as a decimal string (the numeric tail of the full SN).
+#   - 32-bit values are word-swapped: low register first, then high.
+# Scaling: per-pack voltage /100, aggregate voltage & currents /10, V2
+# temperatures are raw-40 (V1 used -41).
+
+
+def ascii_swapped(data: bytes) -> str:
+    """Decode an ASCII field that is byte-swapped within each register.
+
+    For each 2-byte register the low byte precedes the high byte; NUL padding
+    is skipped. Raw `50 41 30 33 00 30` -> "AP300".
+    """
+    out: list[str] = []
+    for i in range(0, len(data) - 1, 2):
+        for byte in (data[i + 1], data[i]):
+            if byte:
+                out.append(chr(byte))
+    return "".join(out)
+
+
+def device_sn_from_registers(data: bytes) -> str:
+    """Decode a numeric serial number field (register order reversed).
+
+    Registers are concatenated last-to-first, big-endian within each register,
+    and the result is rendered as a decimal string.
+    """
+    if len(data) < 2:
+        return "0"
+    chunks = [data[i : i + 2] for i in range(0, len(data) - 1, 2)]
+    joined = b"".join(reversed(chunks))
+    value = int.from_bytes(joined, "big")
+    return str(value) if value else "0"
+
+
+def u32_word_swapped(data: bytes) -> int:
+    """Decode a 32-bit value stored low-register-first (word swapped)."""
+    if len(data) < 4:
+        return 0
+    return (
+        (data[2] << 24) | (data[3] << 16) | (data[0] << 8) | data[1]
+    )
+
+
 def crc16_modbus(data: bytes) -> bytes:
     """Calculate Modbus CRC16 checksum.
 
@@ -678,6 +730,58 @@ def parse_pack_main_info(data: bytes) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # PackItemInfo parser — register 6100 (ProtocolParserV2.java:parsePackItemInfo)
 # ---------------------------------------------------------------------------
+
+def parse_pack_item_info_v2(data: bytes) -> dict[str, Any]:
+    """Parse a V2 (protocolVer >= 2000) per-pack record from reg 6100.
+
+    Byte offsets into the Modbus data payload (header/CRC already stripped):
+        [1]      pack id
+        [2:14]   model, ASCII byte-swapped per register ("PA03" -> "AP300")
+        [14:22]  serial (registers reversed, decimal)
+        [22:24]  voltage / 100
+        [24:26]  current / 10 (the app leaves this unsigned)
+        [27]     SOC %          [29]  SOH %
+        [30:32]  temperature - 40
+        [49] running status     [51] charging status
+        [105] cell count        [107] NTC count      [109] BMU count
+
+    Differs from the V1 layout in the ASCII/SN encoding, the /100 voltage
+    divisor and the -40 (not -41) temperature offset.
+    """
+    result: dict[str, Any] = {}
+    if len(data) < 32:
+        return result
+
+    result["pack_id"] = data[1]
+    result["pack_type"] = ascii_swapped(data[2:14])
+    result["pack_sn"] = device_sn_from_registers(data[14:22])
+    result["pack_voltage"] = _u16(data, 22) / 100.0
+    result["pack_current"] = _u16(data, 24) / 10.0
+
+    if len(data) > 27:
+        result["pack_soc"] = data[27]
+    if len(data) > 29:
+        result["pack_soh"] = data[29]
+    if len(data) > 31:
+        raw_temp = _u16(data, 30)
+        # An all-zero record would otherwise report a bogus -40 °C.
+        result["pack_average_temp"] = raw_temp - 40 if raw_temp else None
+    if len(data) > 49:
+        result["pack_running_status"] = data[49]
+    if len(data) > 51:
+        result["pack_charging_status"] = data[51]
+        result["pack_charging_status_text"] = CHARGING_STATUS_MAP.get(
+            data[51], f"unknown({data[51]})"
+        )
+    if len(data) > 105:
+        result["total_cell_count"] = data[105]
+    if len(data) > 107:
+        result["ntc_cell_count"] = data[107]
+    if len(data) > 109:
+        result["bmu_count"] = data[109]
+
+    return result
+
 
 def parse_pack_item_info(data: bytes) -> dict[str, Any]:
     """Parse PackItemInfo register values for a single battery pack.
