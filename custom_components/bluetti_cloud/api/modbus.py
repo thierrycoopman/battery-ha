@@ -95,23 +95,46 @@ def build_write_command(
     return frame + crc16_modbus(frame)
 
 
-def build_mqtt_payload(register: int, value: int, slave_addr: int = DEFAULT_SLAVE_ADDR) -> bytes:
-    """Build the full MQTT payload for a device command.
+# iotPayloadVer >= 1.1 (2nd-generation IoT, e.g. AP300 / protocolVer >= 2000)
+# wraps the Modbus RTU frame in a 10-byte envelope instead of the single 0x01
+# protocol byte: 01 F8 0F <register:2> 00 00 00 00 00 + <modbus RTU>.
+IOT_PAYLOAD_VER_V2 = 1.1
+_V2_ENVELOPE_HEAD = bytes.fromhex("01F80F")
+_V2_ENVELOPE_LEN = 10
 
-    The MQTT payload is: protocol_type_byte + modbus_frame
-    Protocol type 0x01 = MODBUS_RTU.
 
-    Args:
-        register: Register address.
-        value: Value to write.
-        slave_addr: Modbus slave address.
+def _v2_envelope(register: int) -> bytes:
+    """Build the 10-byte iotPayloadVer-1.2 envelope header for a register."""
+    return (
+        _V2_ENVELOPE_HEAD
+        + bytes([(register >> 8) & 0xFF, register & 0xFF])
+        + bytes(5)
+    )
 
-    Returns:
-        Complete MQTT payload bytes.
+
+def _wrap_mqtt_payload(
+    register: int, modbus_frame: bytes, payload_ver: float
+) -> bytes:
+    """Wrap a Modbus RTU frame in the MQTT payload envelope for a payload version."""
+    if payload_ver >= IOT_PAYLOAD_VER_V2:
+        return _v2_envelope(register) + modbus_frame
+    # Legacy iotPayloadVer 1.0: single 0x01 = MODBUS_RTU protocol byte.
+    return bytes([0x01]) + modbus_frame
+
+
+def build_mqtt_payload(
+    register: int,
+    value: int,
+    slave_addr: int = DEFAULT_SLAVE_ADDR,
+    payload_ver: float = 1.0,
+) -> bytes:
+    """Build the full MQTT payload for a device command (write).
+
+    For iotPayloadVer 1.0 the payload is `0x01 + modbus_frame`. For >= 1.1 it is
+    the 10-byte `01 F8 0F <reg> 00*5` envelope + modbus_frame.
     """
     modbus_frame = build_write_command(register, value, slave_addr)
-    # Prefix with protocol type byte: 0x01 = MODBUS_RTU
-    return bytes([0x01]) + modbus_frame
+    return _wrap_mqtt_payload(register, modbus_frame, payload_ver)
 
 
 def build_read_command(
@@ -146,14 +169,15 @@ def build_read_mqtt_payload(
     register: int,
     count: int,
     slave_addr: int = DEFAULT_SLAVE_ADDR,
+    payload_ver: float = 1.0,
 ) -> bytes:
-    """Build the full MQTT payload for a register read request.
+    """Build the full MQTT payload for a register read request (FC=03).
 
-    The MQTT payload is: protocol_type_byte + modbus_frame.
-    Protocol type 0x01 = MODBUS_RTU.
+    For iotPayloadVer 1.0 the payload is `0x01 + modbus_frame`. For >= 1.1 it is
+    the 10-byte `01 F8 0F <reg> 00*5` envelope + modbus_frame.
     """
     modbus_frame = build_read_command(register, count, slave_addr)
-    return bytes([0x01]) + modbus_frame
+    return _wrap_mqtt_payload(register, modbus_frame, payload_ver)
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +207,12 @@ def parse_mqtt_payload(payload: bytes) -> dict[str, Any] | None:
     if not payload or len(payload) < 6:
         return None
 
-    # Strip protocol byte
-    if payload[0] == PROTOCOL_BYTE:
+    # Strip the payload envelope to get the raw Modbus RTU frame.
+    if len(payload) >= 2 and payload[0] == PROTOCOL_BYTE and payload[1] == 0xF8:
+        # iotPayloadVer 1.2 (2nd-gen IoT, e.g. AP300): 10-byte 01 F8 ... header.
+        frame = payload[_V2_ENVELOPE_LEN:]
+    elif payload[0] == PROTOCOL_BYTE:
+        # Legacy iotPayloadVer 1.0: single 0x01 protocol byte.
         frame = payload[1:]
     else:
         frame = payload
