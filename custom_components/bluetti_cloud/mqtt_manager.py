@@ -218,12 +218,17 @@ class BluettiMqttManager:
                     self._topic_to_sn[topic] = sn
                     self._mqtt_client.subscribe_telemetry(model, sub_sn)
 
-        # Slow down REST polling since MQTT handles real-time data
-        self._coordinator.update_interval = timedelta(seconds=MQTT_SCAN_INTERVAL)
-        _LOGGER.info(
-            "MQTT telemetry active — REST interval increased to %ds",
-            MQTT_SCAN_INTERVAL,
+        # Slow down REST polling since MQTT handles real-time data for the
+        # MQTT devices. But if any configured device is REST-only, keep the
+        # faster interval — REST is its ONLY data source and it must not be
+        # slowed by an unrelated MQTT-capable device sharing this coordinator.
+        has_rest_only = any(
+            self._coordinator.profile_for(sn).data_path == "rest_only"
+            for sn in (self._coordinator.data or {})
         )
+        interval = DEFAULT_SCAN_INTERVAL if has_rest_only else MQTT_SCAN_INTERVAL
+        self._coordinator.update_interval = timedelta(seconds=interval)
+        _LOGGER.info("MQTT telemetry active — REST interval set to %ds", interval)
 
         # Start active polling loop
         self._start_polling()
