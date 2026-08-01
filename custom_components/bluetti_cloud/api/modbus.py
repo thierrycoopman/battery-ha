@@ -201,6 +201,32 @@ NODE_MODEL_NAMES = {
     3012: "Edock",
 }
 
+# Battery pack model codes (PackModel.java) — identifies the specific pack
+# model, e.g. B300 vs B300K vs B500K.
+BATTERY_MODEL_NAMES = {
+    4000: "B500",
+    4001: "HV800",
+    4002: "ENP500",
+    4003: "B1210",
+    4004: "B4810",
+    4005: "B300",
+    4006: "B300K",
+    4007: "B300S",
+    4008: "B1232",
+    4009: "Lead Acid",
+    4010: "LFP",
+    4012: "B500A",
+    4013: "BC200",
+    4014: "B230",
+    4015: "B210",
+    4016: "B500K",
+    4017: "B900",
+    4018: "HB500",
+    4019: "BC260",
+    4020: "IB900",
+    4021: "IB800",
+}
+
 
 def node_is_battery(model: int) -> bool:
     """True if a node model code is a battery (4000-4999 band)."""
@@ -208,9 +234,13 @@ def node_is_battery(model: int) -> bool:
 
 
 def node_model_name(model: int) -> str:
-    """Human-readable name for a node model code."""
+    """Human-readable name for a node model code.
+
+    Batteries resolve to their specific pack model (B300, B300K, B500K, ...);
+    unknown battery codes fall back to a generic label with the raw code.
+    """
     if node_is_battery(model):
-        return "Battery"
+        return BATTERY_MODEL_NAMES.get(model, f"Battery ({model})")
     return NODE_MODEL_NAMES.get(model, f"Unknown({model})")
 
 
