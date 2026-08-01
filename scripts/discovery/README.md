@@ -23,15 +23,17 @@ Modbus) so what they exercise matches what the integration ships.
 | `01_rest_recon.py` | Login, list devices, dump model/protocolVer/telemetry/energy | No (read-only) |
 | `02_mqtt_observe.py` | Connect MQTT, subscribe, log unprompted pushes for 90s | No (read-only) |
 | `03_register_dump.py` | FC=03 reads of known register blocks, parse best-effort | No (read-only) |
-| `04_control_test.py` | Toggle AC/DC outputs with confirmation, then restore | **Yes — flips outputs** |
+| `06_e2e_both.py` | Drive the real coordinator REST path for all devices | No (read-only) |
 
-`02`–`04` need `DEVICE_SN` and `MODEL` filled in from `01`'s output.
+`02` and `03` need `DEVICE_SN` and `MODEL` filled in from `01`'s output.
 
-Findings are recorded in `docs/apex300-findings.md`; raw payloads are saved
-under `tests/fixtures/apex300/` for later fixture-based tests.
+Findings for the AP300 investigation are recorded locally in
+`docs/apex300-findings.md` (the `docs/` directory is gitignored) and summarised
+in the PR description; raw payloads are saved under `tests/fixtures/apex300/`
+for fixture-based tests.
 
-## Safety
-
-`04_control_test.py` physically switches AC then DC outputs on the device.
-Make sure nothing critical is connected before running it. It prompts before
-each toggle and restores the original state afterward.
+> The AP300 (APEX 300) turned out to be REST-only for this integration — it does
+> not respond to the MQTT control protocol — so no control-test script was
+> needed. If you add a device that *is* MQTT-controllable, write a control
+> script that prompts before each toggle and restores the original state, and
+> make sure nothing critical is connected before running it.

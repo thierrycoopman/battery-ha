@@ -22,7 +22,7 @@ from bluetti_cloud.api.client import BluettiCloudApi
 from bluetti_cloud.coordinator import BluettiCloudCoordinator
 
 FIELDS = [
-    "online", "iot_session", "battery_soc", "pack_voltage", "charging_status",
+    "online", "iot_session", "battery_soc", "pack_total_voltage", "charging_status",
     "power_pv_in", "power_grid_in", "power_ac_out", "power_dc_out",
     "ac_switch", "dc_switch", "pv_switch", "grid_switch",
     "energy_total",

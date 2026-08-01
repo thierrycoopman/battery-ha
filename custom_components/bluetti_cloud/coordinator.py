@@ -23,7 +23,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api.client import BluettiCloudApi, BluettiCloudApiError
-from .api.modbus import BATTERY_STATE_MAP
+from .api.modbus import CHARGING_STATUS_MAP
 from .api.mqtt_client import BluettiMqttClient
 from .api.profiles import DeviceProfile, get_profile
 from .const import (
@@ -352,16 +352,20 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         if val is not None:
                             device_data[key] = val
 
-                    # REST-only devices (e.g. AP300) source battery voltage and
-                    # charging status from getDeviceLastAlive; MQTT devices get
-                    # these from the overlay below, which takes precedence.
+                    # REST-only devices (e.g. AP300) source aggregate battery
+                    # voltage and charging status from getDeviceLastAlive; MQTT
+                    # devices get these from the overlay below, which takes
+                    # precedence. Voltage feeds the "Battery Total Voltage"
+                    # sensor (data_key pack_total_voltage). Charging status uses
+                    # the V2 map (codes 0-5); the AP300 is a protocolVer-2015
+                    # device, so codes 3/4/5 (idle/AC/solar) must decode too.
                     voltage = _safe_float(alive_data.get("batteryVoltage"))
                     if voltage is not None:
-                        device_data["pack_voltage"] = voltage
+                        device_data["pack_total_voltage"] = voltage
 
                     charge_raw = _safe_int(alive_data.get("packChargingStatus"))
                     if charge_raw is not None:
-                        device_data["charging_status"] = BATTERY_STATE_MAP.get(
+                        device_data["charging_status"] = CHARGING_STATUS_MAP.get(
                             charge_raw, f"unknown({charge_raw})"
                         )
 

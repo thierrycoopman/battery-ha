@@ -211,8 +211,14 @@ async def async_setup_entry(
         for description in SENSOR_DESCRIPTIONS:
             entities.append(BluettiCloudSensor(coordinator, sn, description))
 
-        # Pack summary sensors (from PackMainInfo)
+        # Pack summary sensors. MQTT devices get voltage + current from
+        # PackMainInfo. REST-only devices (e.g. AP300) report only aggregate
+        # voltage over REST (no aggregate current), so skip the current sensor
+        # rather than create a permanently-unavailable entity.
+        rest_only = coordinator.profile_for(sn).data_path == "rest_only"
         for description in PACK_SUMMARY_DESCRIPTIONS:
+            if rest_only and description.data_key != "pack_total_voltage":
+                continue
             entities.append(BluettiCloudSensor(coordinator, sn, description))
 
         # Per-pack sensors for already-discovered packs

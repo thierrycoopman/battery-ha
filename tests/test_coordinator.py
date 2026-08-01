@@ -307,10 +307,32 @@ async def test_ap300_rest_only_maps_voltage_and_charging(
     # Online + aggregate battery from REST
     assert dev["online"] is True
     assert dev["battery_soc"] == 95
-    assert dev["pack_voltage"] == 531.7  # from batteryVoltage
+    # Voltage surfaces via the "Battery Total Voltage" sensor (pack_total_voltage)
+    assert dev["pack_total_voltage"] == 531.7  # from batteryVoltage
     assert dev["charging_status"] == "standby"  # packChargingStatus 0
     # Switch states readable (but not controllable)
     assert dev["ac_switch"] is False
     assert dev["dc_switch"] is False
     # iotSession "1" from the API normalizes to "Online"
     assert dev["iot_session"] == "Online"
+
+
+@pytest.mark.asyncio
+async def test_ap300_v2_charging_status_codes(mock_hass, mock_config_entry):
+    """AP300 is a V2 device: packChargingStatus 4 (AC charging) must decode."""
+    home, last_alive = _load_ap300_fixtures()
+    sn = home["sn"]
+    # Code 4 = AC charging in the V2 map; the V1 BATTERY_STATE_MAP would miss it.
+    last_alive = {**last_alive, "packChargingStatus": "4"}
+
+    client = AsyncMock()
+    client.get_devices = AsyncMock(return_value=[home])
+    client.get_device_last_alive = AsyncMock(return_value=last_alive)
+    client.get_energy_detail = AsyncMock(return_value={})
+
+    coordinator = _make_coordinator(
+        mock_hass, mock_config_entry, client, [sn], {sn: {"name": "APEX", "model": "AP300"}}
+    )
+
+    data = await coordinator._async_update_data()
+    assert data[sn]["charging_status"] == "charging"

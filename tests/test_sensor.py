@@ -1,6 +1,6 @@
 """Tests for Bluetti Cloud sensor and binary sensor platforms."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -199,3 +199,32 @@ def test_sensor_device_info(mock_coordinator):
     assert device_info["manufacturer"] == "Bluetti"
     assert device_info["name"] == "Winenne"
     assert device_info["model"] == "AC300"
+
+
+@pytest.mark.asyncio
+async def test_rest_only_summary_sensor_is_voltage_only():
+    """AP300 (rest_only) gets Battery Total Voltage but not Total Current."""
+    from custom_components.bluetti_cloud.api.profiles import AP300_PROFILE
+    from custom_components.bluetti_cloud.sensor import async_setup_entry
+
+    coordinator = MagicMock()
+    coordinator.data = {}
+    coordinator._device_info = {}
+    coordinator.get_pack_count.return_value = 0
+    coordinator.profile_for.return_value = AP300_PROFILE
+
+    entry = MagicMock()
+    entry.runtime_data = coordinator
+    entry.data = {"devices": ["AP300SN"]}
+
+    added: list = []
+    with patch("homeassistant.helpers.frame.report_usage"):
+        await async_setup_entry(MagicMock(), entry, added.extend)
+
+    summary_keys = {
+        e.entity_description.data_key
+        for e in added
+        if e.entity_description.data_key in ("pack_total_voltage", "pack_total_current")
+    }
+    assert "pack_total_voltage" in summary_keys
+    assert "pack_total_current" not in summary_keys
