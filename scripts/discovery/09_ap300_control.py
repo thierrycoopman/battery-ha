@@ -18,9 +18,9 @@ from _common import get_credentials
 
 from bluetti_cloud.api.client import BluettiCloudApi
 from bluetti_cloud.api.modbus import (
-    HOME_DATA,
-    HOME_DATA_COUNT,
-    parse_home_data,
+    INV_BASE_SETTINGS,
+    INV_BASE_SETTINGS_COUNT,
+    parse_inv_base_settings,
 )
 from bluetti_cloud.api.mqtt_client import BluettiMqttClient, BluettiMqttError
 from bluetti_cloud.api.profiles import get_profile
@@ -33,17 +33,19 @@ _state: dict[str, bool | None] = {"ac": None, "dc": None}
 
 def on_telemetry(topic: str, parsed: dict) -> None:
     if parsed.get("function_code") == 0x03 and parsed.get("register_data"):
-        home = parse_home_data(parsed["register_data"])
-        if "ctrl_ac_switch" in home:
-            _state["ac"] = home["ctrl_ac_switch"]
-            _state["dc"] = home.get("ctrl_dc_switch")
+        # Authoritative switch state comes from INV_BASE_SETTINGS (reg 2000),
+        # not the homeData ctrl bits.
+        settings = parse_inv_base_settings(parsed["register_data"])
+        if settings and len(parsed["register_data"]) == INV_BASE_SETTINGS_COUNT * 2:
+            _state["ac"] = settings["ctrl_ac_switch"]
+            _state["dc"] = settings["ctrl_dc_switch"]
 
 
 async def read_state(mq, profile) -> tuple[bool | None, bool | None]:
-    """Poll homeData and return the (ac, dc) output states."""
+    """Poll INV_BASE_SETTINGS and return the (ac, dc) output states."""
     _state["ac"] = _state["dc"] = None
     mq.send_read_request(
-        MODEL, SUB, HOME_DATA, HOME_DATA_COUNT,
+        MODEL, SUB, INV_BASE_SETTINGS, INV_BASE_SETTINGS_COUNT,
         slave_addr=profile.slave_addr, payload_ver=profile.iot_payload_ver,
     )
     for _ in range(10):

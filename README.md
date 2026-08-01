@@ -26,7 +26,7 @@ This integration talks to the same private cloud API and MQTT broker as the Blue
 | Device | Protocol | MQTT Telemetry | AC/DC Control | Battery Detail | Tested |
 |--------|:--------:|:--------------:|:-------------:|:--------------:|:------:|
 | **AC300 + B300** | V1 | Yes (FC=16 push) | **Yes** | Per-pack (up to 4) | **Tested** |
-| **APEX 300 (AP300)** | V2 (2nd-gen IoT) | Yes (poll)¹ | **No**¹ | Per-battery² | **Tested** (telemetry) |
+| **APEX 300 (AP300)** | V2 (2nd-gen IoT) | Yes (poll)¹ | **Yes**¹ | Per-battery² | **Tested** |
 | AC200 / AC200P / AC200L / AC200MAX | V1 or V2³ | Likely | Likely on V1 | Likely | Untested |
 | AC500 | V1 or V2³ | Likely | Likely on V1 | Likely | Untested |
 | AC180, AC60 | V1 or V2³ | Likely | Likely on V1 | Unknown | Untested |
@@ -35,11 +35,10 @@ This integration talks to the same private cloud API and MQTT broker as the Blue
 
 > ¹ The APEX 300 (cloud model code `AP300`, protocol version 2015) uses the
 > 2nd-generation IoT protocol (`iotPayloadVer` 1.2 — a `01 F8 0F …` envelope,
-> Modbus slave 0). As of v0.7.0 it has **real-time MQTT telemetry** (SOC,
-> battery voltage, charging status, output states; ~10s refresh) layered on REST
-> for power/energy. **Output control is not yet implemented** — AC/DC/PV/grid
-> outputs appear as **read-only binary sensors** (state only). Control (V2
-> switch registers) is a planned follow-up.
+> Modbus slave 0). It has **real-time MQTT telemetry** (SOC, battery voltage,
+> charging status, output states) layered on REST for power/energy, and as of
+> v0.9.0 **AC and DC output control** via the V2 switch registers — both
+> verified against real hardware.
 >
 > ² Sub-devices are enumerated from the device's `NODE_INFO` registry: each
 > battery and addition (D1 hub / A1 hub / SolarX) becomes a connectivity sensor,
@@ -137,7 +136,7 @@ Created automatically as batteries are discovered. How they appear depends on th
 
 Each carries attributes: model name and code, slave address, whether it is a battery, warning/error flags, serial, and (for batteries) pack model, SOC and cell count.
 
-**Devices without output control** additionally expose their outputs as read-only binary sensors instead of switches:
+**Devices without output control** (models where control has not been verified) expose their outputs as read-only binary sensors instead of switches:
 
 | Entity | Description |
 |--------|-------------|
@@ -148,7 +147,7 @@ Each carries attributes: model name and code, slave address, whether it is a bat
 
 ### Switches
 
-Created only for devices the integration can control (currently V1 devices such as the AC300 — **not** the APEX 300):
+Created for devices the integration can control — currently the AC300 (V1 registers) and the APEX 300 (V2 registers):
 
 | Entity | Description |
 |--------|-------------|
@@ -210,9 +209,6 @@ These are created dynamically as the integration discovers them.
 - **AC300 (V1):** within 1–2 FC=16 push cycles (~30s after MQTT connects). Look for `"discovered battery pack"` in the logs.
 - **APEX 300 (V2):** on the first poll cycle after MQTT connects, via the device's sub-device registry. Look for `"MQTT node info"` in debug logs.
 
-### No switches for my APEX 300
-Expected. Output **control** is not implemented for the APEX 300 yet — its AC/DC/PV/grid outputs appear as **read-only binary sensors** showing state only. Telemetry (SOC, voltage, charging status) works normally.
-
 ### Switches not responding
 Switch control requires MQTT. If MQTT is disconnected, switches won't work. The integration keeps retrying in the background — they start working again once MQTT reconnects.
 
@@ -249,7 +245,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (152 tests) and lint
+# Run tests (168 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```
