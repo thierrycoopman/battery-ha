@@ -61,10 +61,11 @@ def test_ac300_read_blocks():
     assert by_name["pack_item_info"].count == 90
 
 
-def test_unknown_model_falls_back_to_ac300():
-    # Preserves current behavior: unknown devices are treated like the AC300.
-    p = get_profile("SOMETHING_NEW", 9999)
-    assert p is AC300_PROFILE
+def test_unknown_model_falls_back_by_protocol_generation():
+    # Unknown V1-era devices keep the original AC300 behavior...
+    assert get_profile("SOMETHING_OLD", 1500) is AC300_PROFILE
+    # ...but an unknown 2nd-gen device must get V2 framing, not V1.
+    assert get_profile("SOMETHING_NEW", 9999).iot_payload_ver == 1.2
 
 
 def test_profile_is_frozen():
@@ -76,3 +77,23 @@ def test_profile_is_frozen():
         assert err.__class__.__name__ in ("FrozenInstanceError", "AttributeError")
     else:  # pragma: no cover
         raise AssertionError("DeviceProfile should be immutable")
+
+
+def test_unknown_v2_device_gets_v2_profile_not_v1():
+    """An unknown model reporting protocolVer >= 2000 must not get the V1 profile.
+
+    V2 devices need the 01F80F payload envelope and Modbus slave 0; handing them
+    the legacy V1 profile would produce frames the device ignores.
+    """
+    p = get_profile("SOME_NEW_V2_MODEL", 2015)
+    assert p.data_path == "mqtt+rest"
+    assert p.iot_payload_ver == 1.2
+    assert p.slave_addr == 0
+    assert p.pushes_telemetry is False
+    # Unknown model: don't claim controllability we haven't verified.
+    assert p.controllable is False
+
+
+def test_unknown_v1_device_still_falls_back_to_ac300():
+    p = get_profile("SOME_OLD_MODEL", 1018)
+    assert p is AC300_PROFILE

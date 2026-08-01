@@ -7,9 +7,9 @@
 
 > **Personal Project Disclaimer**
 >
-> This integration exists because I needed it. My AC300 + 2x B300 battery packs showed as "offline" in every existing Home Assistant integration, even though they worked perfectly fine in the Bluetti mobile app. No existing solution supported my hardware, so I built my own.
+> This integration exists because I needed it. My AC300 + 2x B300 battery packs showed as "offline" in every existing Home Assistant integration, even though they worked perfectly fine in the Bluetti mobile app. No existing solution supported my hardware, so I built my own — and later extended it to my APEX 300.
 >
-> **This is a personal project scratching a personal itch.** It works on my setup (AC300 with 2 battery packs), but there is absolutely no guarantee it will work on yours. There is no support, no roadmap, and no commitment to maintain this beyond my own needs. If you choose to use it, **you do so entirely at your own risk and responsibility.**
+> **This is a personal project scratching a personal itch.** It works on my setup (an AC300 with battery packs, and an APEX 300 with a D1 hub and a B300), but there is absolutely no guarantee it will work on yours. There is no support, no roadmap, and no commitment to maintain this beyond my own needs. If you choose to use it, **you do so entirely at your own risk and responsibility.**
 >
 > I'm sharing it in case someone else has the same problem, but I cannot help you debug your specific device, fix issues with models I don't own, or provide any form of support.
 
@@ -19,19 +19,19 @@
 
 The official Bluetti HA integration uses OAuth2 and the `/ha/v1/` API namespace, which only supports newer device models. Older devices like the AC300 show as "offline" even when they're fully operational in the Bluetti mobile app.
 
-This integration uses the same API as the Bluetti mobile app, providing full access to device telemetry and control for all cloud-connected Bluetti devices.
+This integration talks to the same private cloud API and MQTT broker as the Bluetti mobile app, so devices the official integration reports as unsupported can still be monitored — and, on supported models, controlled.
 
 ## Supported Devices
 
-| Device | Data path | MQTT Telemetry | AC/DC Control | Per-Pack Sensors | Tested |
-|--------|:---------:|:--------------:|:-------------:|:----------------:|:------:|
-| **AC300 + B300** | MQTT + REST | Yes (FC=16 push) | Yes | Yes (up to 4 packs) | **Tested** |
-| **APEX 300 (AP300)** | MQTT + REST | Yes (V2 poll)¹ | No¹ | Per-battery² | **Tested (telemetry)** |
-| AC200, AC200P, AC200L, AC200MAX | MQTT + REST | Likely (V2 polling) | Likely | Likely | Untested |
-| AC500 | MQTT + REST | Likely | Likely | Likely | Untested |
-| AC180, AC60 | MQTT + REST | Likely | Likely | Unknown | Untested |
-| EP500, EP500Pro, EP600 | MQTT + REST | Likely | Likely | Likely | Untested |
-| EB3A, EB55, EB70 | MQTT + REST | Likely | Likely | N/A (internal battery) | Untested |
+| Device | Protocol | MQTT Telemetry | AC/DC Control | Battery Detail | Tested |
+|--------|:--------:|:--------------:|:-------------:|:--------------:|:------:|
+| **AC300 + B300** | V1 | Yes (FC=16 push) | **Yes** | Per-pack (up to 4) | **Tested** |
+| **APEX 300 (AP300)** | V2 (2nd-gen IoT) | Yes (poll)¹ | **No**¹ | Per-battery² | **Tested** (telemetry) |
+| AC200 / AC200P / AC200L / AC200MAX | V1 or V2³ | Likely | Likely on V1 | Likely | Untested |
+| AC500 | V1 or V2³ | Likely | Likely on V1 | Likely | Untested |
+| AC180, AC60 | V1 or V2³ | Likely | Likely on V1 | Unknown | Untested |
+| EP500, EP500Pro, EP600 | V1 or V2³ | Likely | Likely on V1 | Likely | Untested |
+| EB3A, EB55, EB70 | V1 or V2³ | Likely | Likely on V1 | N/A (internal battery) | Untested |
 
 > ¹ The APEX 300 (cloud model code `AP300`, protocol version 2015) uses the
 > 2nd-generation IoT protocol (`iotPayloadVer` 1.2 — a `01 F8 0F …` envelope,
@@ -47,37 +47,49 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 > etc.) with their own state-of-charge sensor. Per-battery voltage/current/SOH
 > are only reported by the hardware under load, so they are omitted while idle
 > rather than shown as 0.
+>
+> ³ Which protocol a device speaks is determined by its `protocolVer`: **< 2000
+> = V1** (unprompted FC=16 pushes, legacy payload framing, control implemented),
+> **≥ 2000 = V2** (actively polled, `01 F8 0F …` payload envelope, Modbus slave 0,
+> control not yet implemented). A model without an explicit profile falls back by
+> generation — a V2 device gets V2 framing and telemetry — so an unlisted device
+> has a fair chance of working for monitoring. Control is only enabled on models
+> where it has been verified.
 
-**Any Bluetti device that appears in the Bluetti mobile app should work in principle.** The integration uses the same cloud API and MQTT protocol as the app. However, different models may use different protocol versions, register layouts, or Modbus function codes. The only configuration tested and confirmed working is the **AC300 with 2x B300 battery packs**.
+**Any Bluetti device that appears in the Bluetti mobile app should work in principle.** The integration uses the same cloud API and MQTT protocol as the app. However, different models use different protocol versions, register layouts, and payload framing. The configurations actually tested are an **AC300 with B300 packs** (full telemetry + control) and an **APEX 300 with a D1 hub and a B300** (telemetry only).
 
 > If you try this on a different device and it works (or doesn't), feel free to open an issue to let me know — I'll update this table.
 
 ## Features
 
-- **Real-time MQTT telemetry** — Battery SOC, voltage, current, charging status, and switch states updated in real-time via MQTT
-- **Per-battery pack sensors** — Individual voltage, SOC, and charging status for each connected battery pack (AC300 cycles through packs automatically)
-- **AC/DC control** — Switch entities to toggle AC and DC outputs via MQTT with optimistic state updates
-- **Power monitoring** — PV input, grid input, AC output, DC output, grid feed-in (in Watts)
-- **Energy tracking** — Daily, monthly, yearly, and lifetime energy totals (kWh) for the HA Energy Dashboard
-- **Automatic MQTT reconnection** — Exponential backoff retry (30s → 60s → 120s → 5min) with fresh credentials on each attempt
-- **Graceful degradation** — If MQTT is unavailable, falls back to REST-only polling (30s) and keeps retrying MQTT in the background
+- **Real-time MQTT telemetry** — Battery SOC, voltage, current, charging status, and output states, updated live over MQTT
+- **Two device protocols** — V1 devices (AC300) push data unprompted (FC=16); V2 / 2nd-gen IoT devices (APEX 300, `protocolVer` ≥ 2000) are actively polled using a different payload envelope
+- **Sub-device discovery** — On V2 devices, batteries and additions (D1 hub, A1 hub, SolarX) are enumerated and tracked individually, with batteries identified by model (B300 / B300K / B500K, …)
+- **Per-battery sensors** — Individual state of charge per battery
+- **AC/DC control** — Switch entities on devices that support control (AC300); devices without control expose read-only output-state sensors instead
+- **Power monitoring** — PV input, grid input, AC output, DC output, grid feed-in (W)
+- **Energy tracking** — Daily, monthly, yearly, and lifetime totals (kWh) for the HA Energy Dashboard
+- **Automatic MQTT reconnection** — Exponential backoff (30s → 60s → 120s → 5min) with fresh credentials each attempt
+- **Graceful degradation** — If MQTT is unavailable, falls back to REST-only polling and keeps retrying in the background
+- **Reconfigure support** — Add or remove devices on an existing entry without losing history
 
 ### Architecture
 
 ```
- MQTT (real-time)                                          REST API (every 60s)
-                          ┌────────────────────┐
-  FC=16 data pushes  ───> │                    │ <───  homeDevices + lastAlive
-  Battery, packs,    ───> │    Coordinator     │ <───  energyDetail
-  switch echoes      ───> │                    │ <───  online status
-                          └─────────┬──────────┘
-  SUB/{model}/{subSn} ──>          │
-  PUB/{model}/{subSn} <──          │
-  (Modbus RTU frames)              │
-                          HA entity state updates
+ MQTT (real-time)                                    REST API (30–60s)
+                        ┌────────────────────┐
+ V1: FC=16 pushes  ───> │                    │ <───  homeDevices + lastAlive
+ V2: FC=03 polling ───> │    Coordinator     │ <───  energyDetail
+ node/sub-devices  ───> │                    │ <───  online status
+ switch echoes     ───> └─────────┬──────────┘
+                                  │
+ SUB/{model}/{subSn} ──>          │   device profile decides the data path,
+ PUB/{model}/{subSn} <──          │   registers, and payload framing per model
+                                  │
+                        HA entity state updates
 ```
 
-MQTT data takes precedence (more current). REST fills in power readings, energy totals, and online status that MQTT doesn't provide on older devices.
+MQTT data takes precedence where it is available (it is more current). REST supplies power readings, energy totals, and online status that MQTT does not provide on some models. A per-model **device profile** (`api/profiles.py`) selects the data path (`mqtt+rest` vs `rest_only`), Modbus slave address, payload version, register blocks, and whether the device is controllable — so adding a model is a profile entry rather than new branching logic.
 
 ## Entities
 
@@ -98,24 +110,34 @@ MQTT data takes precedence (more current). REST fills in power readings, energy 
 | Energy This Year | Energy generated this year | kWh | REST |
 | Lifetime Energy | Total lifetime energy | kWh | REST |
 
-### Per-Battery Pack Sensors (dynamic)
+### Per-Battery Sensors (dynamic)
 
-Created automatically when battery packs are discovered (e.g., 2 packs = 6 sensors):
+Created automatically as batteries are discovered. How they appear depends on the device protocol:
 
-| Entity | Description | Unit |
-|--------|-------------|------|
-| Pack N Voltage | Individual pack voltage | V |
-| Pack N SOC | Individual pack state of charge | % |
-| Pack N Charging Status | Individual pack charging state | — |
+| Device type | Entities |
+|---|---|
+| **V1 (AC300)** — packs are cycled through by the device | `Pack N Voltage` (V), `Pack N SOC` (%), `Pack N Charging Status` |
+| **V2 (APEX 300)** — batteries are discovered as sub-devices | `<model> (node N) Battery` (%) — e.g. **`B300 (node 51) Battery`** |
+
+> On V2 devices, per-battery **voltage / current / SOH** are only populated by
+> the hardware under load. They are omitted while a pack is idle rather than
+> reported as a misleading `0`.
 
 ### Binary Sensors
 | Entity | Description |
 |--------|-------------|
 | Cloud Connected | Device cloud connectivity status |
-| IoT Session | MQTT IoT session status |
+| IoT Session | Device IoT session status |
 
-**REST-only devices (e.g. APEX 300)** additionally expose their outputs as
-read-only binary sensors instead of switches, since control is not available:
+**Sub-devices (V2 devices)** — one connectivity sensor per discovered node, created dynamically:
+
+| Entity | Description |
+|--------|-------------|
+| `<model> (node N)` | Online state of a battery or addition — e.g. `B300 (node 51)`, `D1 Hub (HD1) (node 11)` |
+
+Each carries attributes: model name and code, slave address, whether it is a battery, warning/error flags, serial, and (for batteries) pack model, SOC and cell count.
+
+**Devices without output control** additionally expose their outputs as read-only binary sensors instead of switches:
 
 | Entity | Description |
 |--------|-------------|
@@ -125,6 +147,9 @@ read-only binary sensors instead of switches, since control is not available:
 | Grid Input | Grid input on/off state (read-only) |
 
 ### Switches
+
+Created only for devices the integration can control (currently V1 devices such as the AC300 — **not** the APEX 300):
+
 | Entity | Description |
 |--------|-------------|
 | AC Output | Toggle AC output on/off (via MQTT) |
@@ -180,14 +205,22 @@ MQTT sensors require an active MQTT connection. Check your HA logs — you shoul
 - Network firewall blocking port 18760 to `iot.bluettipower.com`
 - `pycryptodome` not installed (required for mTLS certificate exchange)
 
-### Per-pack sensors not appearing
-Per-battery pack sensors are created dynamically when the integration discovers connected packs. For AC300, this happens within 1-2 FC=16 push cycles (~30s after MQTT connects). Check logs for `"discovered battery pack"` messages.
+### Per-battery or sub-device sensors not appearing
+These are created dynamically as the integration discovers them.
+- **AC300 (V1):** within 1–2 FC=16 push cycles (~30s after MQTT connects). Look for `"discovered battery pack"` in the logs.
+- **APEX 300 (V2):** on the first poll cycle after MQTT connects, via the device's sub-device registry. Look for `"MQTT node info"` in debug logs.
+
+### No switches for my APEX 300
+Expected. Output **control** is not implemented for the APEX 300 yet — its AC/DC/PV/grid outputs appear as **read-only binary sensors** showing state only. Telemetry (SOC, voltage, charging status) works normally.
 
 ### Switches not responding
-Switch control requires MQTT. If MQTT is disconnected, switches won't work. The integration will keep retrying MQTT in the background — switches will start working once MQTT reconnects.
+Switch control requires MQTT. If MQTT is disconnected, switches won't work. The integration keeps retrying in the background — they start working again once MQTT reconnects.
+
+### A device I just added to my Bluetti account isn't there
+The device list is stored in the config entry, so a restart alone won't pick it up. Use **⋮ → Reconfigure** (see [Adding a device later](#adding-a-device-later)).
 
 ### Device shows as offline
-If the device shows as offline in this integration but online in the mobile app, this is expected for some models. The `iotSession` field may report "Offline" even when the device is controllable via MQTT. MQTT control and telemetry can still work in this state.
+If a device shows offline here but online in the mobile app, this is expected for some models — the `iotSession` field can report offline while MQTT telemetry and control still work.
 
 ### "Invalid email or password"
 Ensure you're using the same credentials as the Bluetti mobile app. The password is case-sensitive.
@@ -196,7 +229,9 @@ Ensure you're using the same credentials as the Bluetti mobile app. The password
 
 This entire integration was **vibe coded with [Claude Code](https://claude.ai/code)** — Anthropic's agentic coding tool. Every line of code, every test, every reverse-engineering session was done in conversation with Claude.
 
-The Bluetti ecosystem has no public API documentation. Getting from "my device shows offline in HA" to "full real-time telemetry with per-battery pack sensors" required reverse engineering the Bluetti Android APK (v3.0.6) to extract the mobile app's private API endpoints, MQTT authentication chain (mTLS + TOTP), and Modbus register maps.
+The Bluetti ecosystem has no public API documentation. Getting from "my device shows offline in HA" to full real-time telemetry required reverse engineering the Bluetti Android APK to extract the mobile app's private API endpoints, the MQTT authentication chain (mTLS + server-time TOTP), and the Modbus register maps.
+
+The APEX 300 needed a second round: it ignores the protocol the AC300 uses. It turned out to speak Bluetti's **2nd-generation IoT protocol** — a different payload envelope (`01 F8 0F …` instead of a single `0x01` byte), Modbus slave `0` instead of `1`, and a set of shared encoding conventions (ASCII fields byte-swapped within each register, serial numbers with reversed register order, word-swapped 32-bit values). Every protocol finding in this integration was verified against real captured payloads from live hardware.
 
 No code was written by hand. This README was also written by Claude.
 
@@ -212,11 +247,23 @@ python -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous
+pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (114 tests)
+# Run tests (152 tests) and lint
 python -m pytest tests/ -v
+ruff check custom_components/ tests/
 ```
+
+### Layout
+
+| Path | Purpose |
+|---|---|
+| `custom_components/bluetti_cloud/api/` | Cloud REST client, MQTT client, crypto/TOTP, Modbus framing + parsers, device profiles |
+| `custom_components/bluetti_cloud/coordinator.py` | REST polling and orchestration |
+| `custom_components/bluetti_cloud/mqtt_manager.py` | MQTT lifecycle, reconnection, polling, telemetry parsing |
+| `custom_components/bluetti_cloud/{sensor,binary_sensor,switch}.py` | Entity platforms |
+| `scripts/discovery/` | Read-only probe scripts used to investigate a device against a live account (see its README) |
+| `tests/fixtures/` | Real captured device payloads used as test fixtures |
 
 ## License
 
