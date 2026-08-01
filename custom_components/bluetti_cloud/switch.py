@@ -78,6 +78,29 @@ ECO_SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
 ]
 
 
+# Grid interaction switches — only for devices whose profile declares them.
+GRID_SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
+    BluettiSwitchDescription(
+        key="grid_charge",
+        data_key="grid_charge",
+        name="Grid Charging",
+        icon="mdi:transmission-tower-import",
+        register=0,
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+    BluettiSwitchDescription(
+        key="feed_in",
+        data_key="feed_in",
+        name="Grid Feed-in",
+        icon="mdi:transmission-tower-export",
+        register=0,
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+]
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BluettiConfigEntry,
@@ -96,6 +119,9 @@ async def async_setup_entry(
             entities.append(BluettiCloudSwitch(coordinator, sn, description))
         if coordinator.profile_for(sn).has_eco:
             for description in ECO_SWITCH_DESCRIPTIONS:
+                entities.append(BluettiCloudSwitch(coordinator, sn, description))
+        if coordinator.profile_for(sn).has_grid_control:
+            for description in GRID_SWITCH_DESCRIPTIONS:
                 entities.append(BluettiCloudSwitch(coordinator, sn, description))
 
     async_add_entities(entities)
@@ -151,6 +177,8 @@ class BluettiCloudSwitch(BluettiCloudEntity, SwitchEntity):
             "dc_switch": profile.dc_switch_reg,
             "ac_eco": profile.ac_eco_reg,
             "dc_eco": profile.dc_eco_reg,
+            "grid_charge": profile.grid_charge_reg,
+            "feed_in": profile.feed_in_reg,
         }.get(desc.key)
         if register is None:
             _LOGGER.error("%s is not controllable on this device", desc.name)

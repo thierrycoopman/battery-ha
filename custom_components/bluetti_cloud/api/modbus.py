@@ -34,6 +34,22 @@ AC_ECO_MODE = 2017          # ProtocolAddrV2.CTRL_AC_ECO_MODE, 0/1
 AC_ECO_AUTO_OFF_HOURS = 2018
 AC_ECO_POWER = 2019
 
+# Charging behaviour and grid interaction (V2)
+CHARGING_MODE = 2020        # enum, see CHARGING_MODES
+SYS_SOC_HIGH_CAPACITY = 2023  # charge ceiling, %
+CTRL_GRID = 2207            # 0/1 — allow charging from the grid
+CTRL_FEED = 2208            # 0/1 — allow exporting to the grid
+GRID_MAX_POWER = 2213       # W — max grid charge power
+FEED_MAX_POWER = 2215       # W — max export power
+
+# Charging mode enum (ProtocolAddrV2.CHARGING_MODE). Value 3 is unused.
+CHARGING_MODES = {
+    0: "standard",
+    1: "silent",
+    2: "turbo",
+    4: "custom",
+}
+
 # Switch command values: simple 0/1 for both V1 and V2
 SWITCH_ON = 1
 SWITCH_OFF = 0
@@ -222,6 +238,8 @@ CONTROL_REGISTERS = frozenset({
     DC_SWITCH_V2,    # 2012, V2
     DC_ECO_MODE,     # 2014, V2
     AC_ECO_MODE,     # 2017, V2
+    CTRL_GRID,       # 2207, V2 — grid charging
+    CTRL_FEED,       # 2208, V2 — feed-in / export
 })
 
 # Numeric settings: register -> (min, max), taken from the ranges the app
@@ -231,6 +249,14 @@ SETTING_RANGES: dict[int, tuple[int, int]] = {
     DC_ECO_POWER: (5, 20),
     AC_ECO_AUTO_OFF_HOURS: (1, 4),
     AC_ECO_POWER: (10, 40),
+    SYS_SOC_HIGH_CAPACITY: (1, 100),
+    GRID_MAX_POWER: (300, 6000),
+    FEED_MAX_POWER: (0, 6000),
+}
+
+# Registers whose value is an enum rather than a range.
+SETTING_ENUMS: dict[int, dict[int, str]] = {
+    CHARGING_MODE: CHARGING_MODES,
 }
 
 
@@ -248,6 +274,15 @@ def build_setting_payload(
     Raises:
         ValueError: for an unknown register or an out-of-range value.
     """
+    allowed = SETTING_ENUMS.get(register)
+    if allowed is not None:
+        if value not in allowed:
+            raise ValueError(
+                f"value {value} is not valid for register {register} "
+                f"(expected one of {sorted(allowed)})"
+            )
+        return build_mqtt_payload(register, value, slave_addr, payload_ver)
+
     bounds = SETTING_RANGES.get(register)
     if bounds is None:
         raise ValueError(
@@ -824,6 +859,179 @@ def parse_pack_main_info(data: bytes) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # PackItemInfo parser — register 6100 (ProtocolParserV2.java:parsePackItemInfo)
 # ---------------------------------------------------------------------------
+
+# V2 telemetry blocks the device pushes unprompted.
+INV_BASE_INFO = 1100     # identity + temperatures
+INV_PV_INFO = 1200       # per-string PV
+INV_GRID_INFO = 1300     # grid frequency / per-phase / import-export energy
+INV_LOAD_INFO = 1400     # AC + DC load breakdown
+INV_INV_INFO = 1500      # inverter output
+PACK_CELL_INFO = 6300    # per-cell voltages + NTC temperatures
+
+
+def _temp_or_none(raw: int) -> int | None:
+    """V2 temperatures are raw-40; raw 0 means "not reported", not -40 C."""
+    return raw - 40 if raw else None
+
+
+def parse_inv_base_info(data: bytes) -> dict[str, Any]:
+    """Parse INV_BASE_INFO (reg 1100) — device temperatures.
+
+    Byte offsets: [102] ambient, [104] inverter max, [106] PV DC-DC max,
+    each u16 with a -40 offset.
+    """
+    if len(data) < 108:
+        return {}
+    return {
+        "ambient_temp": _temp_or_none(_u16(data, 102)),
+        "inverter_temp": _temp_or_none(_u16(data, 104)),
+        "pv_dcdc_temp": _temp_or_none(_u16(data, 106)),
+    }
+
+
+def parse_inv_pv_info(data: bytes) -> dict[str, Any]:
+    """Parse INV_PV_INFO (reg 1200) — total PV plus per-string detail.
+
+    [0:4] total charge power (W, word-swapped), [4:8] total energy (/10 kWh),
+    [19] high nibble = AC string count, low nibble = DC string count.
+    Each string is 8 registers from byte 20: [+1] status, [+3] type,
+    [+4:6] power W, [+6:8] voltage /10 V, [+8:10] current /10 A.
+    """
+    if len(data) < 20:
+        return {}
+    ac_count = data[19] >> 4
+    dc_count = data[19] & 0x0F
+    strings: list[dict[str, Any]] = []
+    for i in range(ac_count + dc_count):
+        off = 20 + 16 * i
+        if off + 10 > len(data):
+            break
+        strings.append({
+            "index": i + 1,
+            "status": data[off + 1],
+            "power": _u16(data, off + 4),
+            "voltage": _u16(data, off + 6) / 10.0,
+            "current": _u16(data, off + 8) / 10.0,
+        })
+    return {
+        "pv_total_power": u32_word_swapped(data[0:4]),
+        "pv_total_energy": u32_word_swapped(data[4:8]) / 10.0,
+        "pv_ac_string_count": ac_count,
+        "pv_dc_string_count": dc_count,
+        "pv_strings": strings,
+    }
+
+
+def parse_inv_grid_info(data: bytes) -> dict[str, Any]:
+    """Parse INV_GRID_INFO (reg 1300) — grid frequency, energy, per phase.
+
+    [0:2] frequency /10 Hz, [2:6] power (word-swapped, absolute),
+    [6:10] import energy /10 kWh, [10:14] export energy /10 kWh — note the
+    export field is plain big-endian, NOT word-swapped, matching the app.
+    [25] phase count, then 6 registers per phase from byte 26.
+    """
+    if len(data) < 26:
+        return {}
+    phase_count = data[25]
+    phases: list[dict[str, Any]] = []
+    for i in range(phase_count):
+        off = 26 + 12 * i
+        if off + 8 > len(data):
+            break
+        phases.append({
+            "index": i + 1,
+            "power": _u16(data, off),
+            "voltage": _u16(data, off + 2) / 10.0,
+            "current": _u16(data, off + 4) / 10.0,
+            "apparent_power": _u16(data, off + 6),
+        })
+    return {
+        "grid_frequency": _u16(data, 0) / 10.0,
+        "grid_power": u32_word_swapped(data[2:6]),
+        "grid_import_energy": u32_word_swapped(data[6:10]) / 10.0,
+        "grid_export_energy": int.from_bytes(data[10:14], "big") / 10.0,
+        "grid_phases": phase_count,
+        "grid_phase_detail": phases,
+    }
+
+
+def parse_inv_load_info(data: bytes) -> dict[str, Any]:
+    """Parse INV_LOAD_INFO (reg 1400) — DC and AC load breakdown."""
+    if len(data) < 48:
+        return {}
+    result: dict[str, Any] = {
+        "dc_load_power": u32_word_swapped(data[0:4]),
+        "dc_load_energy": u32_word_swapped(data[4:8]) / 10.0,
+        "dc_5v_power": _u16(data, 8),
+        "dc_12v_power": _u16(data, 12),
+        "dc_24v_power": _u16(data, 16),
+        "ac_load_power": u32_word_swapped(data[40:44]),
+        "ac_load_energy": u32_word_swapped(data[44:48]) / 10.0,
+    }
+    if len(data) > 27:
+        result["dc_load_voltage"] = _u16(data, 24) / 10.0
+        result["dc_load_current"] = _u16(data, 26) / 10.0
+    if len(data) > 59:
+        result["ac_load_phases"] = data[59]
+    return result
+
+
+def parse_inv_inv_info(data: bytes) -> dict[str, Any]:
+    """Parse INV_INV_INFO (reg 1500) — inverter output."""
+    if len(data) < 18:
+        return {}
+    return {
+        "inverter_frequency": _u16(data, 0) / 10.0,
+        "inverter_energy": u32_word_swapped(data[2:6]) / 10.0,
+        "inverter_phases": data[17],
+    }
+
+
+def parse_pack_cells(data: bytes) -> dict[str, Any]:
+    """Parse PACK_CELL_INFO (reg 6300) — per-cell voltages and NTC temps.
+
+    [1] cell count, [3] NTC count, then one register per cell from byte 4:
+    voltage_mV = raw & 0x3FFF (so /1000 -> V, unlike the /100 used for pack
+    voltage), balancing flag = (raw & 0xC000) >> 14. NTC temperatures follow,
+    packed two per register (low byte first), each raw-40.
+    """
+    if len(data) < 6:
+        return {}
+    cell_count = data[1]
+    ntc_count = data[3]
+    voltages: list[float] = []
+    balancing: list[bool] = []
+    for i in range(cell_count):
+        off = 4 + 2 * i
+        if off + 2 > len(data):
+            break
+        raw = _u16(data, off)
+        voltages.append((raw & 0x3FFF) / 1000.0)
+        balancing.append(bool((raw & 0xC000) >> 14))
+
+    temps: list[int] = []
+    ntc_off = 4 + 2 * cell_count
+    for j in range((ntc_count + 1) // 2):
+        off = ntc_off + 2 * j
+        if off + 2 > len(data):
+            break
+        for raw in (data[off + 1], data[off]):
+            if len(temps) < ntc_count:
+                temps.append(raw - 40)
+
+    result: dict[str, Any] = {
+        "cell_count": cell_count,
+        "ntc_count": ntc_count,
+        "cell_voltages": voltages,
+        "cell_balancing": balancing,
+        "cell_temperatures": temps,
+    }
+    if voltages:
+        result["cell_voltage_min"] = min(voltages)
+        result["cell_voltage_max"] = max(voltages)
+        result["cell_voltage_delta"] = round(max(voltages) - min(voltages), 4)
+    return result
+
 
 def parse_inv_base_settings(data: bytes) -> dict[str, Any]:
     """Parse V2 inverter base settings (reg 2000) — authoritative switch state.

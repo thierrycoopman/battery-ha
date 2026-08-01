@@ -76,6 +76,15 @@ class DeviceProfile:
     # ECO mode (idle-load auto-shutoff). None when the model doesn't expose it.
     ac_eco_reg: int | None = None
     dc_eco_reg: int | None = None
+    # Grid interaction + charging behaviour (V2). None when unsupported.
+    grid_charge_reg: int | None = None
+    feed_in_reg: int | None = None
+    charging_mode_reg: int | None = None
+
+    @property
+    def has_grid_control(self) -> bool:
+        """True if grid charging / feed-in can be toggled."""
+        return self.grid_charge_reg is not None or self.feed_in_reg is not None
 
     @property
     def has_eco(self) -> bool:
@@ -132,6 +141,9 @@ AP300_PROFILE = DeviceProfile(
     switch_encoding="simple",
     ac_eco_reg=2017,
     dc_eco_reg=2014,
+    grid_charge_reg=2207,
+    feed_in_reg=2208,
+    charging_mode_reg=2020,
 )
 
 
