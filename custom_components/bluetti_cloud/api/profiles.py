@@ -125,6 +125,28 @@ AP300_PROFILE = DeviceProfile(
 )
 
 
+# Generic fallback for an unrecognised 2nd-generation IoT device (protocolVer
+# >= 2000). Such devices need the V2 payload envelope and Modbus slave 0, so
+# falling back to the V1 profile would produce frames they ignore. Telemetry
+# registers are the common V2 blocks; control is left off because switch
+# registers and value encoding vary per model and are unverified here.
+GENERIC_V2_PROFILE = DeviceProfile(
+    model="",
+    protocol_ver_min=2000,
+    data_path="mqtt+rest",
+    pushes_telemetry=False,
+    slave_addr=0,
+    iot_payload_ver=1.2,
+    read_blocks=(
+        ReadBlock("home_data", 100, 62, "home_data"),
+        ReadBlock("pack_main_info", 6000, 34, "pack_main_info"),
+        ReadBlock("pack_item_info", 6100, 90, "pack_item_info"),
+    ),
+)
+
+# Protocol version at/above which a device uses the 2nd-generation IoT stack.
+PROTOCOL_VER_V2 = 2000
+
 # Registry of known profiles, most specific first. Extended as models are added.
 _PROFILES: tuple[DeviceProfile, ...] = (AC300_PROFILE, AP300_PROFILE)
 
@@ -132,8 +154,9 @@ _PROFILES: tuple[DeviceProfile, ...] = (AC300_PROFILE, AP300_PROFILE)
 def get_profile(model: str, protocol_ver: int) -> DeviceProfile:
     """Return the device profile for a model + protocol version.
 
-    Falls back to the AC300 profile for unknown models, preserving the
-    integration's original behavior.
+    Unknown models fall back by protocol generation: >= 2000 gets the generic
+    V2 profile (correct payload framing and slave address, telemetry only),
+    anything older gets the AC300 profile — the integration's original behavior.
     """
     candidates = [
         p
@@ -143,4 +166,6 @@ def get_profile(model: str, protocol_ver: int) -> DeviceProfile:
     if candidates:
         # Highest protocol_ver_min wins (most specific match).
         return max(candidates, key=lambda p: p.protocol_ver_min)
+    if protocol_ver >= PROTOCOL_VER_V2:
+        return GENERIC_V2_PROFILE
     return AC300_PROFILE
