@@ -257,6 +257,29 @@ async def async_setup_entry(
 
     coordinator.register_new_pack_callback(_on_new_packs)
 
+    # Per-battery SOC sensors for discovered battery sub-devices (nodes).
+    created_nodes: dict[str, set[int]] = {sn: set() for sn in device_sns}
+
+    def _on_nodes(sn: str, nodes: list[dict]) -> None:
+        if sn not in created_nodes:
+            return
+        new_entities: list[BluettiCloudNodeBatterySensor] = []
+        for node in nodes:
+            if not node.get("is_battery"):
+                continue
+            addr = node["slave_addr"]
+            if addr in created_nodes[sn]:
+                continue
+            created_nodes[sn].add(addr)
+            _LOGGER.info("Creating SOC sensor for %s battery node %d", sn, addr)
+            new_entities.append(BluettiCloudNodeBatterySensor(coordinator, sn, addr))
+        if new_entities:
+            async_add_entities(new_entities)
+
+    for sn in device_sns:
+        _on_nodes(sn, coordinator.get_nodes(sn))
+    coordinator.register_node_callback(_on_nodes)
+
 
 class BluettiCloudSensor(BluettiCloudEntity, SensorEntity):
     """Bluetti Cloud sensor entity."""
@@ -275,3 +298,32 @@ class BluettiCloudSensor(BluettiCloudEntity, SensorEntity):
     @property
     def native_value(self) -> int | float | str | None:
         return self.device_data.get(self.entity_description.data_key)
+
+
+class BluettiCloudNodeBatterySensor(BluettiCloudEntity, SensorEntity):
+    """State of charge for an individual battery sub-device (node)."""
+
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+
+    def __init__(
+        self,
+        coordinator: BluettiCloudCoordinator,
+        device_sn: str,
+        slave_addr: int,
+    ) -> None:
+        super().__init__(coordinator, device_sn, f"node_{slave_addr}_soc")
+        self._slave_addr = slave_addr
+        model = self._node().get("model_name", "Battery")
+        self._attr_name = f"{model} (node {slave_addr}) Battery"
+
+    def _node(self) -> dict:
+        for node in self.device_data.get("nodes", []):
+            if node.get("slave_addr") == self._slave_addr:
+                return node
+        return {}
+
+    @property
+    def native_value(self) -> int | None:
+        return self._node().get("pack_soc")
