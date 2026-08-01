@@ -178,7 +178,7 @@ class BluettiCloudNodeBinarySensor(BluettiCloudEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, object]:
         node = self._node()
-        return {
+        attrs: dict[str, object] = {
             "model": node.get("model_name"),
             "model_code": node.get("model"),
             "slave_address": self._slave_addr,
@@ -187,3 +187,9 @@ class BluettiCloudNodeBinarySensor(BluettiCloudEntity, BinarySensorEntity):
             "error": node.get("error"),
             "serial": node.get("sn"),
         }
+        # Per-battery detail, when the node reported its own pack record.
+        for key in ("pack_model", "pack_serial", "pack_soc", "cell_count",
+                    "pack_voltage"):
+            if key in node:
+                attrs[key] = node[key]
+        return attrs

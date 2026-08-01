@@ -232,3 +232,41 @@ async def test_rest_only_summary_sensor_is_voltage_only():
     }
     assert "pack_total_voltage" in summary_keys
     assert "pack_total_current" not in summary_keys
+
+
+@pytest.mark.asyncio
+async def test_per_battery_node_soc_sensor():
+    """Battery sub-device nodes get their own SOC sensor."""
+    from custom_components.bluetti_cloud.api.profiles import AP300_PROFILE
+    from custom_components.bluetti_cloud.sensor import (
+        BluettiCloudNodeBatterySensor,
+        async_setup_entry,
+    )
+
+    nodes = [
+        {"slave_addr": 11, "model": 3007, "model_name": "D1 Hub (HD1)",
+         "is_battery": False, "online": True},
+        {"slave_addr": 51, "model": 4005, "model_name": "B300",
+         "is_battery": True, "online": True, "pack_soc": 95, "cell_count": 16},
+    ]
+    coordinator = MagicMock()
+    coordinator.data = {"SN": {"nodes": nodes}}
+    coordinator._device_info = {}
+    coordinator.get_pack_count.return_value = 0
+    coordinator.profile_for.return_value = AP300_PROFILE
+    coordinator.get_nodes.return_value = nodes
+
+    entry = MagicMock()
+    entry.runtime_data = coordinator
+    entry.data = {"devices": ["SN"]}
+
+    added: list = []
+    with patch("homeassistant.helpers.frame.report_usage"):
+        await async_setup_entry(MagicMock(), entry, added.extend)
+
+    node_sensors = [e for e in added if isinstance(e, BluettiCloudNodeBatterySensor)]
+    # Only the battery node gets a SOC sensor, not the hub
+    assert len(node_sensors) == 1
+    assert node_sensors[0]._slave_addr == 51
+    assert node_sensors[0].native_value == 95
+    assert "B300" in node_sensors[0].name
