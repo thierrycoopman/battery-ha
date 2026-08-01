@@ -32,6 +32,7 @@ from .api.modbus import (
     HOME_DATA,
     HOME_DATA_COUNT,
     IOT_PAYLOAD_VER_V2,
+    NODE_INFO,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT,
     PACK_MAIN_INFO,
@@ -39,6 +40,7 @@ from .api.modbus import (
     PACK_SELECT,
     parse_fc16_registers,
     parse_home_data,
+    parse_node_info,
     parse_pack_item_info,
     parse_pack_main_info,
 )
@@ -120,6 +122,9 @@ class BluettiMqttManager:
         self._fc16_devices: set[str] = set()
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
+        # Sub-device (NODE_INFO) discovery: seen node slave addrs + callbacks
+        self._discovered_nodes: dict[str, set[int]] = {}
+        self._node_callbacks: list[Callable[[str, list[dict[str, Any]]], None]] = []
         # Registers that returned Modbus errors — skip in future polls
         # Key: sn, Value: set of (register, slave_addr) tuples
         self._unsupported_registers: dict[str, set[tuple[int, int]]] = {}
@@ -150,6 +155,19 @@ class BluettiMqttManager:
         Callback signature: (device_sn: str, pack_count: int) -> None
         """
         self._new_pack_callbacks.append(callback)
+
+    def register_node_callback(
+        self, callback: Callable[[str, list[dict[str, Any]]], None]
+    ) -> None:
+        """Register a callback for when new sub-device nodes are discovered.
+
+        Callback signature: (device_sn: str, nodes: list[dict]) -> None
+        """
+        self._node_callbacks.append(callback)
+
+    def get_nodes(self, sn: str) -> list[dict[str, Any]]:
+        """Return the last known sub-device node list for a device."""
+        return self.overlays.get(sn, {}).get("nodes", [])
 
     # -- MQTT lifecycle --
 
@@ -354,6 +372,11 @@ class BluettiMqttManager:
                             slave_addr=profile.slave_addr,
                             payload_ver=profile.iot_payload_ver,
                         )
+                        # Enumerate sub-devices (batteries, D1/A1 hubs) via the
+                        # NODE_INFO query-write.
+                        await self._poll_node_info(
+                            sn, model, sub_sn, profile.iot_payload_ver
+                        )
                     else:
                         # Legacy V1 poll path (slave 1, 0x01 framing).
                         await self._poll_register(
@@ -374,6 +397,31 @@ class BluettiMqttManager:
             _LOGGER.debug("MQTT polling loop cancelled")
         except Exception:
             _LOGGER.exception("MQTT polling loop crashed")
+
+    async def _poll_node_info(
+        self, sn: str, model: str, sub_sn: str, payload_ver: float
+    ) -> None:
+        """Send a NODE_INFO query-write and wait for the sub-device list reply."""
+        if not self._mqtt_client or not self._mqtt_client.is_connected:
+            return
+
+        self._pending_request = (NODE_INFO, 0)
+        self._response_event.clear()
+        try:
+            self._mqtt_client.send_node_query(model, sub_sn, 1, payload_ver)
+        except BluettiMqttError:
+            _LOGGER.debug("Failed to send node query for %s", sn)
+            self._pending_request = None
+            return
+
+        try:
+            await asyncio.wait_for(
+                self._response_event.wait(), timeout=MQTT_REQUEST_TIMEOUT
+            )
+        except TimeoutError:
+            _LOGGER.debug("Timeout waiting for node info: %s", sn)
+        finally:
+            self._pending_request = None
 
     async def _poll_register(
         self,
@@ -487,6 +535,15 @@ class BluettiMqttManager:
         if not register_data or start_addr is None:
             return
 
+        # NODE_INFO (reg 21000) replies arrive as FC=0x10 too, but carry the
+        # sub-device list, not telemetry registers — route them separately.
+        if start_addr == NODE_INFO:
+            self._process_node_info(sn, register_data)
+            pending = self._pending_request
+            if pending is not None and pending[0] == NODE_INFO:
+                self._response_event.set()
+            return
+
         _LOGGER.debug(
             "MQTT FC=16 data for %s: start_addr=%d, %d bytes",
             sn, start_addr, len(register_data),
@@ -538,6 +595,32 @@ class BluettiMqttManager:
 
         # Signal the polling loop so it doesn't waste time on timeout
         self._response_event.set()
+
+    def _process_node_info(self, sn: str, register_data: bytes) -> None:
+        """Parse a NODE_INFO reply and store the sub-device list in the overlay."""
+        nodes = parse_node_info(register_data)
+        if not nodes:
+            return
+        _LOGGER.debug(
+            "MQTT node info for %s: %d nodes (%s)",
+            sn, len(nodes), ", ".join(n["model_name"] for n in nodes),
+        )
+        mqtt_overlay = self.overlays.setdefault(sn, {})
+        mqtt_overlay["nodes"] = nodes
+        mqtt_overlay["mqtt_active"] = True
+
+        # Notify listeners when previously-unseen nodes appear (dynamic entities)
+        seen = self._discovered_nodes.setdefault(sn, set())
+        new_addrs = {n["slave_addr"] for n in nodes} - seen
+        if new_addrs:
+            seen |= new_addrs
+            for cb in self._node_callbacks:
+                try:
+                    cb(sn, nodes)
+                except Exception:
+                    _LOGGER.exception("Error in node discovery callback")
+
+        self._push_mqtt_update()
 
     def _route_register_data(
         self, sn: str, register: int, slave_addr: int, register_data: bytes

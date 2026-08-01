@@ -28,6 +28,7 @@ SWITCH_OFF = 0
 HOME_DATA = 100          # Aggregate SOC, V/I, charging status, switch states
 PACK_MAIN_INFO = 6000    # Battery summary: total V/I/SOC/SOH, temp, charge times
 PACK_ITEM_INFO = 6100    # Per-battery pack: V, I, SOC, SOH, temp, status
+NODE_INFO = 21000        # V2 sub-device (mesh node) registry — see build_node_info_query
 
 # Register counts for FC=03 reads (number of 16-bit registers)
 HOME_DATA_COUNT = 62         # 124 bytes
@@ -178,6 +179,91 @@ def build_read_mqtt_payload(
     """
     modbus_frame = build_read_command(register, count, slave_addr)
     return _wrap_mqtt_payload(register, modbus_frame, payload_ver)
+
+
+# ---------------------------------------------------------------------------
+# NODE_INFO (reg 21000) — V2 sub-device (mesh node) enumeration
+# ---------------------------------------------------------------------------
+#
+# Unlike telemetry reads, NODE_INFO is a write-then-reply query: the app WRITES
+# a `version` selector into reg 21000 (FC=16) and the device replies with a
+# FC=0x10 frame carrying the list. version=1 = mesh node list (batteries +
+# hubs/inverter). Each record is 16 bytes after a 4-byte header.
+
+# Known node model codes (DeviceModel.getFromNumber); batteries are 4000-4999.
+NODE_MODEL_NAMES = {
+    6: "AP300",
+    8: "Elite 200 V2",
+    56: "AP500",
+    3007: "D1 Hub (HD1)",
+    3008: "A1 Hub (HA1)",
+    3009: "SolarX 4K",
+    3012: "Edock",
+}
+
+
+def node_is_battery(model: int) -> bool:
+    """True if a node model code is a battery (4000-4999 band)."""
+    return 4000 <= model < 5000
+
+
+def node_model_name(model: int) -> str:
+    """Human-readable name for a node model code."""
+    if node_is_battery(model):
+        return "Battery"
+    return NODE_MODEL_NAMES.get(model, f"Unknown({model})")
+
+
+def build_node_info_query(version: int = 1, payload_ver: float = 1.2) -> bytes:
+    """Build the NODE_INFO query payload: FC=16 write of `version` to reg 21000.
+
+    version=1 selects the mesh node list (batteries + hubs/inverter). The device
+    replies with a FC=0x10 frame whose register_data is parsed by parse_node_info.
+    """
+    slave = 0
+    frame = bytes([
+        slave,
+        FUNC_WRITE_MULTIPLE,
+        (NODE_INFO >> 8) & 0xFF,
+        NODE_INFO & 0xFF,
+        0x00, 0x01,          # quantity: 1 register
+        0x02,                # byte count
+        (version >> 8) & 0xFF, version & 0xFF,
+    ])
+    frame += crc16_modbus(frame)
+    return _wrap_mqtt_payload(NODE_INFO, frame, payload_ver)
+
+
+def parse_node_info(register_data: bytes) -> list[dict[str, Any]]:
+    """Parse a NODE_INFO (version 1) reply into a list of sub-device nodes.
+
+    Layout: 4-byte header ([0:2]=version, [3]=numberOffset) then 16 bytes/node:
+        [0]groupNo [1]slaveAddress [2]slaveAddressGroup [3]parentNo
+        [4:6]status-bits [6:14]sn [14:16]modelNumber
+    status bits: 0=meshOnline 1=upgrade 2=warning 3=error 4=dcEnable.
+    """
+    if len(register_data) < 4 + 16:
+        return []
+
+    body = register_data[4:]
+    nodes: list[dict[str, Any]] = []
+    for i in range(len(body) // 16):
+        r = body[i * 16 : (i + 1) * 16]
+        status = (r[4] << 8) | r[5]
+        model = (r[14] << 8) | r[15]
+        nodes.append({
+            "slave_addr": r[1],
+            "parent_no": r[3],
+            "model": model,
+            "model_name": node_model_name(model),
+            "is_battery": node_is_battery(model),
+            "online": bool(status & 0x01),
+            "upgrading": bool(status & 0x02),
+            "warning": bool(status & 0x04),
+            "error": bool(status & 0x08),
+            "sn": r[6:14].hex(),
+        })
+    return nodes
 
 
 # ---------------------------------------------------------------------------

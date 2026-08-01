@@ -219,6 +219,16 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         """
         self._mqtt.register_new_pack_callback(callback)
 
+    def register_node_callback(
+        self, callback: Callable[[str, list[dict[str, Any]]], None]
+    ) -> None:
+        """Register a callback for when new sub-device nodes are discovered."""
+        self._mqtt.register_node_callback(callback)
+
+    def get_nodes(self, sn: str) -> list[dict[str, Any]]:
+        """Return the last known sub-device node list for a device."""
+        return self._mqtt.get_nodes(sn)
+
     async def async_start_mqtt(self) -> None:
         """Start MQTT client and subscribe to device telemetry topics."""
         await self._mqtt.async_start()
