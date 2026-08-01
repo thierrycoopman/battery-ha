@@ -15,6 +15,13 @@
         "data": {
           "devices": "Devices"
         }
+      },
+      "reconfigure": {
+        "title": "Change Devices",
+        "description": "Choose which devices to monitor. Devices added to your Bluetti account since setup appear here.",
+        "data": {
+          "devices": "Devices"
+        }
       }
     },
     "error": {
@@ -24,7 +31,8 @@
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This account is already configured."
+      "already_configured": "This account is already configured.",
+      "reconfigure_successful": "Devices updated."
     }
   }
 }

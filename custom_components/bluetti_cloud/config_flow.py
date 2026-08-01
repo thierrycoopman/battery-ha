@@ -84,6 +84,85 @@ class BluettiCloudConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Change which devices are monitored on an existing entry.
+
+        Re-authenticates with the stored credentials and re-lists the account's
+        devices, so a newly bound device (e.g. an APEX 300 added after setup)
+        can be added without deleting and re-creating the integration.
+        """
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if not self._devices:
+            self._username = entry.data["username"]
+            self._password = entry.data["password"]
+            session = async_get_clientsession(self.hass)
+            self._client = BluettiCloudApi(session)
+            try:
+                await self._client.login(self._username, self._password)
+                self._devices = await self._client.get_devices()
+            except AuthenticationError:
+                errors["base"] = "invalid_auth"
+            except BluettiCloudApiError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error during reconfigure")
+                errors["base"] = "unknown"
+            else:
+                if not self._devices:
+                    errors["base"] = "no_devices"
+
+        if user_input is not None and not errors:
+            selected_sns = user_input.get("devices", [])
+            device_info = {
+                dev.get("sn", ""): {
+                    "name": dev.get("name", dev.get("sn", "")),
+                    "model": dev.get("model", "Unknown"),
+                }
+                for dev in self._devices
+                if dev.get("sn", "") in selected_sns
+            }
+            return self.async_update_reload_and_abort(
+                entry,
+                data_updates={
+                    "devices": selected_sns,
+                    "device_info": device_info,
+                },
+            )
+
+        current = entry.data.get("devices", [])
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("devices", default=current): SelectSelector(
+                        SelectSelectorConfig(
+                            options=self._device_options(),
+                            multiple=True,
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    def _device_options(self) -> list[SelectOptionDict]:
+        """Build the multi-select options for the account's devices."""
+        options = []
+        for dev in self._devices:
+            sn = dev.get("sn", "")
+            name = dev.get("name", sn)
+            model = dev.get("model", "")
+            online = dev.get("sessionState") or "Offline"
+            options.append(
+                SelectOptionDict(value=sn, label=f"{name} ({model}) - {online}")
+            )
+        return options
+
     async def async_step_devices(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -109,19 +188,8 @@ class BluettiCloudConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        # Build device options for multi-select with checkboxes
-        options = []
-        all_sns = []
-        for dev in self._devices:
-            sn = dev.get("sn", "")
-            name = dev.get("name", sn)
-            model = dev.get("model", "")
-            session_state = dev.get("sessionState", "Offline")
-            online = session_state if session_state else "Offline"
-            options.append(
-                SelectOptionDict(value=sn, label=f"{name} ({model}) - {online}")
-            )
-            all_sns.append(sn)
+        # Build device options for multi-select with checkboxes (all selected)
+        all_sns = [dev.get("sn", "") for dev in self._devices]
 
         return self.async_show_form(
             step_id="devices",
@@ -129,7 +197,7 @@ class BluettiCloudConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required("devices", default=all_sns): SelectSelector(
                         SelectSelectorConfig(
-                            options=options,
+                            options=self._device_options(),
                             multiple=True,
                             mode=SelectSelectorMode.LIST,
                         )
