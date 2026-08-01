@@ -39,14 +39,32 @@ def test_parse_node_info_real_ap300():
     assert bat["slave_addr"] == 51
     assert bat["model"] == 4005
     assert node_is_battery(bat["model"]) is True
-    assert node_model_name(bat["model"]) == "Battery"
+    assert node_model_name(bat["model"]) == "B300"
     assert bat["online"] is True
 
 
 def test_node_model_names():
     assert node_model_name(6) == "AP300"
     assert node_model_name(3008) == "A1 Hub (HA1)"
-    assert node_model_name(4018) == "Battery"
+
+
+def test_battery_models_are_named_specifically():
+    # Battery pack codes come from the app's PackModel table.
+    assert node_model_name(4005) == "B300"
+    assert node_model_name(4006) == "B300K"
+    assert node_model_name(4016) == "B500K"
+    assert node_model_name(4000) == "B500"
+    assert node_model_name(4014) == "B230"
+    # Unknown battery codes still identify as a battery
+    assert node_is_battery(4099) is True
+    assert node_model_name(4099) == "Battery (4099)"
+
+
+def test_real_ap300_external_battery_is_b300():
+    data = bytes.fromhex((FIXTURES / "node_info_v1.hex").read_text().strip())
+    battery = next(n for n in parse_node_info(data) if n["is_battery"])
+    assert battery["model"] == 4005
+    assert battery["model_name"] == "B300"
 
 
 def test_node_info_reg_constant():
