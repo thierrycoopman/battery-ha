@@ -98,6 +98,13 @@ _MQTT_SWITCH_MAP = {
 }
 
 # Register address to switch data key (for FC=06 write echo)
+# Unsolicited FC=03 frames carry no start_addr. Only lengths that uniquely
+# identify a block are accepted; anything else is ignored rather than guessed.
+_UNSOLICITED_BY_LENGTH = {
+    HOME_DATA_COUNT * 2: HOME_DATA,
+    INV_BASE_SETTINGS_COUNT * 2: INV_BASE_SETTINGS,
+}
+
 # Telemetry blocks the device pushes, and the parser for each.
 _BLOCK_PARSERS = {
     INV_BASE_INFO: parse_inv_base_info,
@@ -571,14 +578,25 @@ class BluettiMqttManager:
         if not register_data:
             return
 
-        # Determine which parser to use based on pending request
+        # Determine which parser to use based on the pending request.
         pending = self._pending_request
         if pending is not None:
             register, slave_addr = pending
         else:
-            # No pending request — assume homeData (passive response / unsolicited)
-            register = HOME_DATA
+            # Unsolicited frame: the device pushes FC=03 data with no
+            # start_addr, so the only clue is the payload length. Guessing
+            # homeData here would decode e.g. a 208-byte pack frame with the
+            # 124-byte homeData layout and emit garbage, so anything that
+            # isn't an exact length match is left alone.
+            register = _UNSOLICITED_BY_LENGTH.get(len(register_data))
             slave_addr = 1
+            if register is None:
+                _LOGGER.debug(
+                    "Ignoring unsolicited FC=03 frame for %s: %d bytes, "
+                    "no pending request to identify it",
+                    sn, len(register_data),
+                )
+                return
 
         self._route_register_data(sn, register, slave_addr, register_data)
 

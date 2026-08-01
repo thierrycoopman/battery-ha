@@ -839,7 +839,7 @@ def parse_pack_main_info(data: bytes) -> dict[str, Any]:
     if len(data) > 13:
         result["pack_total_soh"] = data[13]
     if len(data) > 15:
-        result["pack_average_temp"] = _u16(data, 14) - 40
+        result["pack_average_temp"] = _temp_or_none(_u16(data, 14))
     if len(data) > 17:
         result["pack_running_status"] = data[17]
     if len(data) > 19:
@@ -1128,7 +1128,7 @@ def parse_pack_item_info(data: bytes) -> dict[str, Any]:
     if len(data) > 29:
         result["pack_soh"] = data[29]
     if len(data) > 31:
-        result["pack_average_temp"] = _u16(data, 30) - 40
+        result["pack_average_temp"] = _temp_or_none(_u16(data, 30))
 
     if len(data) > 49:
         result["pack_running_status"] = data[49]
