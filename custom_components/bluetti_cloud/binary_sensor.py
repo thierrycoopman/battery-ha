@@ -9,12 +9,10 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
-from .coordinator import BluettiCloudCoordinator
+from .coordinator import BluettiCloudCoordinator, BluettiConfigEntry
 from .entity import BluettiCloudEntity
 
 
@@ -43,14 +41,48 @@ BINARY_SENSOR_DESCRIPTIONS: list[BluettiBinarySensorDescription] = [
     ),
 ]
 
+# Read-only output-state sensors for REST-only devices (e.g. AP300 / APEX 300),
+# which expose AC/DC/PV/grid switch states over REST but cannot be controlled.
+# MQTT-capable devices (AC300) get real controllable switches instead.
+OUTPUT_STATE_DESCRIPTIONS: list[BluettiBinarySensorDescription] = [
+    BluettiBinarySensorDescription(
+        key="ac_output_state",
+        data_key="ac_switch",
+        name="AC Output",
+        device_class=BinarySensorDeviceClass.POWER,
+        icon="mdi:power-plug",
+    ),
+    BluettiBinarySensorDescription(
+        key="dc_output_state",
+        data_key="dc_switch",
+        name="DC Output",
+        device_class=BinarySensorDeviceClass.POWER,
+        icon="mdi:current-dc",
+    ),
+    BluettiBinarySensorDescription(
+        key="pv_input_state",
+        data_key="pv_switch",
+        name="Solar Input",
+        device_class=BinarySensorDeviceClass.POWER,
+        icon="mdi:solar-power",
+    ),
+    BluettiBinarySensorDescription(
+        key="grid_input_state",
+        data_key="grid_switch",
+        name="Grid Input",
+        device_class=BinarySensorDeviceClass.POWER,
+        icon="mdi:transmission-tower",
+    ),
+]
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: BluettiConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Bluetti Cloud binary sensor entities."""
-    coordinator: BluettiCloudCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
 
     entities: list[BluettiCloudBinarySensor] = []
     for sn in entry.data.get("devices", []):
@@ -58,6 +90,14 @@ async def async_setup_entry(
             entities.append(
                 BluettiCloudBinarySensor(coordinator, sn, description)
             )
+
+        # REST-only devices can't be controlled — surface their AC/DC/PV/grid
+        # output states as read-only binary sensors instead of switches.
+        if coordinator.profile_for(sn).data_path == "rest_only":
+            for description in OUTPUT_STATE_DESCRIPTIONS:
+                entities.append(
+                    BluettiCloudBinarySensor(coordinator, sn, description)
+                )
 
     async_add_entities(entities)
 

@@ -12,14 +12,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api.modbus import AC_SWITCH, DC_SWITCH, SWITCH_OFF, SWITCH_ON
 from .api.mqtt_client import BluettiMqttError
-from .const import DOMAIN
-from .coordinator import BluettiCloudCoordinator
+from .coordinator import BluettiCloudCoordinator, BluettiConfigEntry
 from .entity import BluettiCloudEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -59,14 +57,18 @@ SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: BluettiConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Bluetti Cloud switch entities."""
-    coordinator: BluettiCloudCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
 
     entities: list[BluettiCloudSwitch] = []
     for sn in entry.data.get("devices", []):
+        # Only devices controllable over MQTT get switch entities. REST-only
+        # devices (e.g. AP300) expose output state via read-only binary sensors.
+        if not coordinator.profile_for(sn).controllable:
+            continue
         for description in SWITCH_DESCRIPTIONS:
             entities.append(BluettiCloudSwitch(coordinator, sn, description))
 

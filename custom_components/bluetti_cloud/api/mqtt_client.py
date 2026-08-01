@@ -31,9 +31,9 @@ from typing import Any
 import aiohttp
 import paho.mqtt.client as mqtt
 
+from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
 from .modbus import build_mqtt_payload, build_read_mqtt_payload, parse_mqtt_payload
 from .totp import generate_totp
-from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -286,7 +286,9 @@ class BluettiMqttClient:
         between TOTP creation and MQTT CONNECT packet.
         """
         # Download certificates if needed
-        if not self._pfx_data and (not self._pem_cert or not os.path.exists(self._pem_cert)):
+        if not self._pfx_data and (
+            not self._pem_cert or not os.path.exists(self._pem_cert)
+        ):
             await self._download_certificates()
 
         parts = self._token.split(".")

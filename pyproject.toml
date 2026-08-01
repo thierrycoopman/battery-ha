@@ -1,0 +1,18 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["venv", "app", "_apk", "_reference"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# ASYNC240 suggests trio.Path/anyio.Path for os.path in async funcs; this
+# codebase uses aiohttp/paho, not trio/anyio, and the only hit is a single
+# cheap stat during MQTT connect. Keeping the rest of the ASYNC ruleset.
+ignore = ["ASYNC240"]
+# Discovery scripts intentionally use private client internals and broad
+# excepts while probing live hardware.
+[tool.ruff.lint.per-file-ignores]
+"scripts/discovery/*" = ["E402", "BLE001", "T201", "SLF001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bluetti_cloud", "custom_components"]

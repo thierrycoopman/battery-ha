@@ -2,15 +2,11 @@
 
 import struct
 
-import pytest
-
 from custom_components.bluetti_cloud.api.modbus import (
     AC_SWITCH,
-    BATTERY_STATE_MAP,
     DC_SWITCH,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
     EXCEPTION_ILLEGAL_FUNCTION,
-    FUNC_ERROR_MASK,
     FUNC_READ_HOLDING,
     FUNC_WRITE_MULTIPLE,
     FUNC_WRITE_SINGLE,
@@ -34,7 +30,6 @@ from custom_components.bluetti_cloud.api.modbus import (
     parse_pack_main_info,
     parse_write_response,
 )
-
 
 # -- CRC16 --
 
@@ -331,7 +326,10 @@ def test_parse_home_data_basic():
 
 def test_parse_home_data_charging_status_codes():
     """Test all known charging status codes."""
-    for code, expected in [(0, "standby"), (1, "charging"), (2, "discharging"), (4, "charging"), (5, "charging")]:
+    for code, expected in [
+        (0, "standby"), (1, "charging"), (2, "discharging"),
+        (4, "charging"), (5, "charging"),
+    ]:
         data = _build_home_data(charging=code)
         hd = parse_home_data(data)
         assert hd["charging_status"] == expected, f"Code {code} should be {expected}"

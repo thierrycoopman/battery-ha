@@ -245,6 +245,7 @@ async def test_mqtt_disconnect_restores_rest_interval(
 ):
     """Test that REST interval is restored and reconnection is scheduled when MQTT disconnects."""
     from datetime import timedelta
+
     from custom_components.bluetti_cloud.const import DEFAULT_SCAN_INTERVAL
 
     coordinator = _make_coordinator(
@@ -265,3 +266,118 @@ async def test_mqtt_disconnect_restores_rest_interval(
     assert coordinator.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
     # Verify reconnection was scheduled
     mock_reconnect.assert_called_once()
+
+
+def _load_ap300_fixtures():
+    """Load the real AP300 (APEX 300) REST fixtures captured from the device."""
+    import json
+    import pathlib
+
+    base = pathlib.Path(__file__).parent / "fixtures" / "apex300"
+    home = json.loads((base / "home_devices.json").read_text())
+    last_alive = json.loads((base / "last_alive.json").read_text())
+    return home, last_alive
+
+
+@pytest.mark.asyncio
+async def test_ap300_rest_only_maps_voltage_and_charging(
+    mock_hass, mock_config_entry
+):
+    """AP300 (rest_only): voltage and charging status come from REST."""
+    home, last_alive = _load_ap300_fixtures()
+    sn = home["sn"]
+
+    client = AsyncMock()
+    client.get_devices = AsyncMock(return_value=[home])
+    client.get_device_last_alive = AsyncMock(return_value=last_alive)
+    # AP300 energyDetail returns zeros in practice
+    client.get_energy_detail = AsyncMock(
+        return_value={"day": 0, "month": 0, "year": 0, "total": 0}
+    )
+
+    coordinator = _make_coordinator(
+        mock_hass, mock_config_entry, client, [sn], {sn: {"name": "APEX", "model": "AP300"}}
+    )
+
+    data = await coordinator._async_update_data()
+    dev = data[sn]
+
+    # Profile resolved to REST-only from model + factoryProtocolVer 2015
+    assert coordinator.profile_for(sn).data_path == "rest_only"
+    # Online + aggregate battery from REST
+    assert dev["online"] is True
+    assert dev["battery_soc"] == 95
+    # Voltage surfaces via the "Battery Total Voltage" sensor (pack_total_voltage)
+    assert dev["pack_total_voltage"] == 531.7  # from batteryVoltage
+    assert dev["charging_status"] == "standby"  # packChargingStatus 0
+    # Switch states readable (but not controllable)
+    assert dev["ac_switch"] is False
+    assert dev["dc_switch"] is False
+    # iotSession "1" from the API normalizes to "Online"
+    assert dev["iot_session"] == "Online"
+
+
+@pytest.mark.asyncio
+async def test_ap300_v2_charging_status_codes(mock_hass, mock_config_entry):
+    """AP300 is a V2 device: packChargingStatus 4 (AC charging) must decode."""
+    home, last_alive = _load_ap300_fixtures()
+    sn = home["sn"]
+    # Code 4 = AC charging in the V2 map; the V1 BATTERY_STATE_MAP would miss it.
+    last_alive = {**last_alive, "packChargingStatus": "4"}
+
+    client = AsyncMock()
+    client.get_devices = AsyncMock(return_value=[home])
+    client.get_device_last_alive = AsyncMock(return_value=last_alive)
+    client.get_energy_detail = AsyncMock(return_value={})
+
+    coordinator = _make_coordinator(
+        mock_hass, mock_config_entry, client, [sn], {sn: {"name": "APEX", "model": "AP300"}}
+    )
+
+    data = await coordinator._async_update_data()
+    assert data[sn]["charging_status"] == "charging"
+
+
+@pytest.mark.asyncio
+async def test_mqtt_active_keeps_fast_interval_when_rest_only_device_present(
+    mock_hass, mock_config_entry
+):
+    """A REST-only device must not be slowed to the MQTT interval by a
+    co-configured MQTT device sharing the coordinator."""
+    from datetime import timedelta
+
+    from custom_components.bluetti_cloud.api.profiles import (
+        AC300_PROFILE,
+        AP300_PROFILE,
+    )
+    from custom_components.bluetti_cloud.const import (
+        DEFAULT_SCAN_INTERVAL,
+        MQTT_SCAN_INTERVAL,
+    )
+
+    coordinator = _make_coordinator(
+        mock_hass, mock_config_entry, AsyncMock(), ["AC300X", "AP300Y"], {}
+    )
+    # Simulate a completed REST refresh: data + resolved profiles present.
+    coordinator._mqtt.overlays.clear()
+    coordinator.data = {
+        "AC300X": {"device_type": "AC300", "sub_sn": "X"},
+        "AP300Y": {"device_type": "AP300", "sub_sn": "Y"},
+    }
+    coordinator._profiles = {"AC300X": AC300_PROFILE, "AP300Y": AP300_PROFILE}
+
+    # Make the executor + MQTT client no-ops so async_start reaches the
+    # interval decision without real network work.
+    mock_hass.async_add_executor_job = AsyncMock()
+    fake_client = MagicMock()
+    fake_client.is_connected = False
+    fake_client.async_prepare = AsyncMock(return_value={})
+    with patch(
+        "custom_components.bluetti_cloud.mqtt_manager.BluettiMqttClient",
+        return_value=fake_client,
+    ):
+        await coordinator.async_start_mqtt()
+
+    # Mixed config with a rest_only device → keep the fast 30s interval.
+    assert coordinator.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+    assert DEFAULT_SCAN_INTERVAL < MQTT_SCAN_INTERVAL

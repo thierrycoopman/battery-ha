@@ -6,8 +6,8 @@ from typing import Any
 
 import aiohttp
 
-from .crypto import encrypt_password, hash_password
 from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
+from .crypto import encrypt_password, hash_password
 
 _LOGGER = logging.getLogger(__name__)
 

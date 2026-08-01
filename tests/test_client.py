@@ -63,8 +63,14 @@ async def test_login_sends_transformed_password(mock_session, sample_login_respo
 
     call_kwargs = mock_session.post.call_args
     form_data = call_kwargs.kwargs.get("data", {})
-    assert form_data["password"] == "FFC121A2210958BF74E5A874668F3D978D24B6A8241496CCFF3C0EA245E4F126"
-    assert form_data["passOpen"] == "b890d65b4cad5e88b713c465bda69ec02cff13ed3ea675b79b7944e70d5281cd"
+    assert (
+        form_data["password"]
+        == "FFC121A2210958BF74E5A874668F3D978D24B6A8241496CCFF3C0EA245E4F126"
+    )
+    assert (
+        form_data["passOpen"]
+        == "b890d65b4cad5e88b713c465bda69ec02cff13ed3ea675b79b7944e70d5281cd"
+    )
 
 
 @pytest.mark.asyncio

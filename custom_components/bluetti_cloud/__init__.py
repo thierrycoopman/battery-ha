@@ -12,21 +12,19 @@ Architecture: MQTT+REST hybrid
 
 import logging
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api.client import BluettiCloudApi
-from .const import DOMAIN
-from .coordinator import BluettiCloudCoordinator
+from .coordinator import BluettiCloudCoordinator, BluettiConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: BluettiConfigEntry) -> bool:
     """Set up Bluetti Cloud from a config entry."""
     session = async_get_clientsession(hass)
     client = BluettiCloudApi(session)
@@ -51,7 +49,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         coordinator._schedule_reconnect()
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    entry.runtime_data = coordinator
 
     # Stop MQTT cleanly on HA shutdown to avoid "task still running" warnings
     entry.async_on_unload(
@@ -65,12 +63,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: BluettiConfigEntry) -> bool:
     """Unload a Bluetti Cloud config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        coordinator: BluettiCloudCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
-        coordinator.async_stop_mqtt()
-        if not hass.data[DOMAIN]:
-            hass.data.pop(DOMAIN)
+        entry.runtime_data.async_stop_mqtt()
 
     return unload_ok
