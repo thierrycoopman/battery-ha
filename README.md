@@ -26,7 +26,7 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 | Device | Data path | MQTT Telemetry | AC/DC Control | Per-Pack Sensors | Tested |
 |--------|:---------:|:--------------:|:-------------:|:----------------:|:------:|
 | **AC300 + B300** | MQTT + REST | Yes (FC=16 push) | Yes | Yes (up to 4 packs) | **Tested** |
-| **APEX 300 (AP300)** | MQTT + REST | Yes (V2 poll)¹ | No¹ | Count only² | **Tested (telemetry)** |
+| **APEX 300 (AP300)** | MQTT + REST | Yes (V2 poll)¹ | No¹ | Per-battery² | **Tested (telemetry)** |
 | AC200, AC200P, AC200L, AC200MAX | MQTT + REST | Likely (V2 polling) | Likely | Likely | Untested |
 | AC500 | MQTT + REST | Likely | Likely | Likely | Untested |
 | AC180, AC60 | MQTT + REST | Likely | Likely | Unknown | Untested |
@@ -41,10 +41,12 @@ This integration uses the same API as the Bluetti mobile app, providing full acc
 > outputs appear as **read-only binary sensors** (state only). Control (V2
 > switch registers) is a planned follow-up.
 >
-> ² The device reports a battery **count** (surfaced via telemetry), but
-> individual per-battery detail for its multi-battery / hub topology (up to 6
-> batteries plus additions like the D1 hub / A1) is still being reverse-
-> engineered (via the device's `NODE_INFO` sub-device registry).
+> ² Sub-devices are enumerated from the device's `NODE_INFO` registry: each
+> battery and addition (D1 hub / A1 hub / SolarX) becomes a connectivity sensor,
+> and batteries are identified by their specific model (**B300 / B300K / B500K**,
+> etc.) with their own state-of-charge sensor. Per-battery voltage/current/SOH
+> are only reported by the hardware under load, so they are omitted while idle
+> rather than shown as 0.
 
 **Any Bluetti device that appears in the Bluetti mobile app should work in principle.** The integration uses the same cloud API and MQTT protocol as the app. However, different models may use different protocol versions, register layouts, or Modbus function codes. The only configuration tested and confirmed working is the **AC300 with 2x B300 battery packs**.
 
@@ -163,6 +165,13 @@ Or manually:
 3. Enter your Bluetti account email and password (same credentials as the Bluetti mobile app)
 4. Select which devices to monitor
 5. Done! Entities will appear automatically
+
+### Adding a device later
+
+If you bind a new device to your Bluetti account after setup, you don't need to
+remove the integration: go to **Settings → Devices & Services → Bluetti Cloud →
+⋮ → Reconfigure** and tick the new device. Existing entities and history are
+preserved.
 
 ## Troubleshooting
 
