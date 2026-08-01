@@ -56,6 +56,10 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Typed config entry: entry.runtime_data is the coordinator (PEP 695 alias is
+# lazily evaluated, so the forward reference to the class below is fine).
+type BluettiConfigEntry = ConfigEntry[BluettiCloudCoordinator]
+
 
 def _safe_float(value: Any) -> float | None:
     """Convert to float, returning None only when value is absent."""

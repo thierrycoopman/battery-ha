@@ -11,7 +11,6 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfElectricCurrent,
@@ -22,8 +21,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
-from .coordinator import BluettiCloudCoordinator
+from .coordinator import BluettiCloudCoordinator, BluettiConfigEntry
 from .entity import BluettiCloudEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -199,11 +197,11 @@ def _build_pack_descriptions(pack_id: int) -> list[BluettiSensorDescription]:
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: BluettiConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Bluetti Cloud sensor entities."""
-    coordinator: BluettiCloudCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     device_sns = entry.data.get("devices", [])
 
     entities: list[BluettiCloudSensor] = []

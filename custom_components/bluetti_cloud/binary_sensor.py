@@ -9,12 +9,10 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
-from .coordinator import BluettiCloudCoordinator
+from .coordinator import BluettiCloudCoordinator, BluettiConfigEntry
 from .entity import BluettiCloudEntity
 
 
@@ -46,11 +44,11 @@ BINARY_SENSOR_DESCRIPTIONS: list[BluettiBinarySensorDescription] = [
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: BluettiConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Bluetti Cloud binary sensor entities."""
-    coordinator: BluettiCloudCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
 
     entities: list[BluettiCloudBinarySensor] = []
     for sn in entry.data.get("devices", []):
