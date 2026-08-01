@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -59,6 +60,7 @@ from .const import (
     MQTT_RECONNECT_MIN,
     MQTT_REQUEST_TIMEOUT,
     MQTT_SCAN_INTERVAL,
+    PUSH_ACTIVE_WINDOW,
 )
 
 if TYPE_CHECKING:
@@ -131,6 +133,9 @@ class BluettiMqttManager:
         self._fc16_devices: set[str] = set()
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
+        # Last time a V2 device pushed telemetry (monotonic seconds), used to
+        # skip redundant polling while the device is streaming on its own.
+        self._last_push: dict[str, float] = {}
         # Sub-device (NODE_INFO) discovery: seen node slave addrs + callbacks
         self._discovered_nodes: dict[str, set[int]] = {}
         self._node_callbacks: list[Callable[[str, list[dict[str, Any]]], None]] = []
@@ -372,6 +377,14 @@ class BluettiMqttManager:
 
                     profile = self._coordinator.profile_for(sn)
                     if profile.iot_payload_ver >= IOT_PAYLOAD_VER_V2:
+                        # The device streams telemetry on its own; polling on
+                        # top of that is redundant traffic. Still poll while it
+                        # is quiet, so data never goes stale if the stream stops.
+                        if self.is_streaming(sn):
+                            _LOGGER.debug(
+                                "Skipping poll for %s — device is streaming", sn
+                            )
+                            continue
                         # 2nd-gen IoT poll device (AP300): homeData (reg 100)
                         # provides aggregate SOC/voltage/charging/switch state.
                         # Per-pack blocks (PackMainInfo/PackItemInfo) are a
@@ -587,16 +600,22 @@ class BluettiMqttManager:
             sn, start_addr, len(register_data),
         )
 
-        # Parse using AC300 register map (actual register addresses)
-        self._process_fc16_data(sn, start_addr, register_data)
-
-        # Also route to V2 parsers if start_addr matches V2 register addresses
         slave_addr = 1
         pending = self._pending_request
         if pending is not None:
             slave_addr = pending[1]
 
-        self._route_register_data(sn, start_addr, slave_addr, register_data)
+        # V2 devices stream telemetry as FC=16 pushes using V2 register
+        # addresses. They must NOT go through the V1 (AC300) register map:
+        # besides producing nonsense, it would flag the device as a V1 pusher
+        # and disable its polling.
+        if self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2:
+            self._note_push(sn)
+            self._route_register_data(sn, start_addr, slave_addr, register_data)
+        else:
+            # V1: AC300 register map (raw addresses 0, 36, 70, 130, 3000)
+            self._process_fc16_data(sn, start_addr, register_data)
+            self._route_register_data(sn, start_addr, slave_addr, register_data)
 
         # Only signal response event if this matches the pending request
         if pending is not None and start_addr == pending[0]:
@@ -659,6 +678,15 @@ class BluettiMqttManager:
                     _LOGGER.exception("Error in node discovery callback")
 
         self._push_mqtt_update()
+
+    def _note_push(self, sn: str) -> None:
+        """Record that a device pushed telemetry unprompted."""
+        self._last_push[sn] = time.monotonic()
+
+    def is_streaming(self, sn: str) -> bool:
+        """True if the device pushed telemetry recently enough to skip polling."""
+        last = self._last_push.get(sn)
+        return last is not None and (time.monotonic() - last) < PUSH_ACTIVE_WINDOW
 
     def _process_inv_base_settings(self, sn: str, register_data: bytes) -> None:
         """Store the authoritative AC/DC switch state from reg 2000."""
