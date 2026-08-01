@@ -280,10 +280,11 @@ def _load_ap300_fixtures():
 
 
 @pytest.mark.asyncio
-async def test_ap300_rest_only_maps_voltage_and_charging(
+async def test_ap300_rest_baseline_maps_voltage_and_charging(
     mock_hass, mock_config_entry
 ):
-    """AP300 (rest_only): voltage and charging status come from REST."""
+    """AP300 REST baseline: voltage and charging status come from REST
+    (MQTT overlays these live, but the REST values must be correct too)."""
     home, last_alive = _load_ap300_fixtures()
     sn = home["sn"]
 
@@ -302,8 +303,8 @@ async def test_ap300_rest_only_maps_voltage_and_charging(
     data = await coordinator._async_update_data()
     dev = data[sn]
 
-    # Profile resolved to REST-only from model + factoryProtocolVer 2015
-    assert coordinator.profile_for(sn).data_path == "rest_only"
+    # Profile resolved from model + factoryProtocolVer 2015 (MQTT+REST, V2)
+    assert coordinator.profile_for(sn).data_path == "mqtt+rest"
     # Online + aggregate battery from REST
     assert dev["online"] is True
     assert dev["battery_soc"] == 95
@@ -348,23 +349,26 @@ async def test_mqtt_active_keeps_fast_interval_when_rest_only_device_present(
 
     from custom_components.bluetti_cloud.api.profiles import (
         AC300_PROFILE,
-        AP300_PROFILE,
+        DeviceProfile,
     )
     from custom_components.bluetti_cloud.const import (
         DEFAULT_SCAN_INTERVAL,
         MQTT_SCAN_INTERVAL,
     )
 
+    rest_only_profile = DeviceProfile(
+        model="RESTONLY", protocol_ver_min=0, data_path="rest_only"
+    )
     coordinator = _make_coordinator(
-        mock_hass, mock_config_entry, AsyncMock(), ["AC300X", "AP300Y"], {}
+        mock_hass, mock_config_entry, AsyncMock(), ["AC300X", "RESTY"], {}
     )
     # Simulate a completed REST refresh: data + resolved profiles present.
     coordinator._mqtt.overlays.clear()
     coordinator.data = {
         "AC300X": {"device_type": "AC300", "sub_sn": "X"},
-        "AP300Y": {"device_type": "AP300", "sub_sn": "Y"},
+        "RESTY": {"device_type": "RESTONLY", "sub_sn": "Y"},
     }
-    coordinator._profiles = {"AC300X": AC300_PROFILE, "AP300Y": AP300_PROFILE}
+    coordinator._profiles = {"AC300X": AC300_PROFILE, "RESTY": rest_only_profile}
 
     # Make the executor + MQTT client no-ops so async_start reaches the
     # interval decision without real network work.

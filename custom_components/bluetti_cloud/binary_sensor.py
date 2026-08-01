@@ -91,9 +91,10 @@ async def async_setup_entry(
                 BluettiCloudBinarySensor(coordinator, sn, description)
             )
 
-        # REST-only devices can't be controlled — surface their AC/DC/PV/grid
-        # output states as read-only binary sensors instead of switches.
-        if coordinator.profile_for(sn).data_path == "rest_only":
+        # Devices we can't control — surface their AC/DC/PV/grid output states
+        # as read-only binary sensors instead of switches. (This covers both
+        # REST-only devices and MQTT devices whose control isn't implemented.)
+        if not coordinator.profile_for(sn).controllable:
             for description in OUTPUT_STATE_DESCRIPTIONS:
                 entities.append(
                     BluettiCloudBinarySensor(coordinator, sn, description)

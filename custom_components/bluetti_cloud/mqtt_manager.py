@@ -31,6 +31,7 @@ from .api.modbus import (
     FUNC_WRITE_SINGLE,
     HOME_DATA,
     HOME_DATA_COUNT,
+    IOT_PAYLOAD_VER_V2,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT,
     PACK_MAIN_INFO,
@@ -342,19 +343,31 @@ class BluettiMqttManager:
                     if sn in self._fc16_devices:
                         continue
 
-                    # V2 devices need active polling via FC=03 reads
-                    await self._poll_register(
-                        sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT
-                    )
-                    await self._poll_register(
-                        sn, model, sub_sn, PACK_MAIN_INFO, PACK_MAIN_INFO_COUNT
-                    )
-                    pack_count = self._pack_counts.get(sn, 0)
-                    for pack_idx in range(1, pack_count + 1):
+                    profile = self._coordinator.profile_for(sn)
+                    if profile.iot_payload_ver >= IOT_PAYLOAD_VER_V2:
+                        # 2nd-gen IoT poll device (AP300): homeData (reg 100)
+                        # provides aggregate SOC/voltage/charging/switch state.
+                        # Per-pack blocks (PackMainInfo/PackItemInfo) are a
+                        # follow-up (#5). Uses slave 0 + the V2 payload envelope.
                         await self._poll_register(
-                            sn, model, sub_sn, PACK_ITEM_INFO, PACK_ITEM_INFO_COUNT,
-                            slave_addr=pack_idx,
+                            sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT,
+                            slave_addr=profile.slave_addr,
+                            payload_ver=profile.iot_payload_ver,
                         )
+                    else:
+                        # Legacy V1 poll path (slave 1, 0x01 framing).
+                        await self._poll_register(
+                            sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT
+                        )
+                        await self._poll_register(
+                            sn, model, sub_sn, PACK_MAIN_INFO, PACK_MAIN_INFO_COUNT
+                        )
+                        pack_count = self._pack_counts.get(sn, 0)
+                        for pack_idx in range(1, pack_count + 1):
+                            await self._poll_register(
+                                sn, model, sub_sn, PACK_ITEM_INFO,
+                                PACK_ITEM_INFO_COUNT, slave_addr=pack_idx,
+                            )
 
                 await asyncio.sleep(MQTT_POLL_INTERVAL)
         except asyncio.CancelledError:
@@ -370,6 +383,7 @@ class BluettiMqttManager:
         register: int,
         count: int,
         slave_addr: int = 1,
+        payload_ver: float = 1.0,
     ) -> None:
         """Send a single FC=03 read request and wait for response."""
         if not self._mqtt_client or not self._mqtt_client.is_connected:
@@ -387,7 +401,7 @@ class BluettiMqttManager:
 
         try:
             self._mqtt_client.send_read_request(
-                model, sub_sn, register, count, slave_addr
+                model, sub_sn, register, count, slave_addr, payload_ver
             )
         except BluettiMqttError:
             _LOGGER.debug(
@@ -579,6 +593,15 @@ class BluettiMqttManager:
         for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
             if ctrl_key in home_data:
                 mqtt_overlay[switch_key] = home_data[ctrl_key]
+
+        # homeData carries the aggregate battery voltage/current; surface them
+        # via the "Battery Total Voltage"/"Current" sensors (pack_total_*). For
+        # V1 FC=16 devices these come from PackMainInfo instead; this block only
+        # runs for poll-driven devices (FC=16 devices are skipped above).
+        if "pack_voltage" in home_data:
+            mqtt_overlay["pack_total_voltage"] = home_data["pack_voltage"]
+        if "pack_current" in home_data:
+            mqtt_overlay["pack_total_current"] = home_data["pack_current"]
 
         mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()

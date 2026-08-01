@@ -507,21 +507,22 @@ class BluettiMqttClient:
 
     def send_read_request(
         self, model: str, sub_sn: str, register: int, count: int,
-        slave_addr: int = 1,
+        slave_addr: int = 1, payload_ver: float = 1.0,
     ) -> None:
         """Send a Modbus FC=03 read request to a device via MQTT.
 
         The device will respond on the PUB topic with the requested register data.
+        payload_ver selects the MQTT envelope (1.0 legacy, >= 1.1 = 2nd-gen IoT).
         """
         if not self._client or not self._connected:
             raise BluettiMqttError("Not connected to MQTT broker")
 
         topic = f"SUB/{model}/{sub_sn}"
-        payload = build_read_mqtt_payload(register, count, slave_addr)
+        payload = build_read_mqtt_payload(register, count, slave_addr, payload_ver)
 
         _LOGGER.debug(
-            "MQTT read request %s: reg=%d count=%d slave=%d payload=%s",
-            topic, register, count, slave_addr, payload.hex(),
+            "MQTT read request %s: reg=%d count=%d slave=%d pver=%s payload=%s",
+            topic, register, count, slave_addr, payload_ver, payload.hex(),
         )
 
         result = self._client.publish(topic, payload, qos=1)

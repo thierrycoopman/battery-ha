@@ -203,19 +203,23 @@ def test_sensor_device_info(mock_coordinator):
 
 @pytest.mark.asyncio
 async def test_rest_only_summary_sensor_is_voltage_only():
-    """AP300 (rest_only) gets Battery Total Voltage but not Total Current."""
-    from custom_components.bluetti_cloud.api.profiles import AP300_PROFILE
+    """A REST-only device gets Battery Total Voltage but not Total Current
+    (REST has no aggregate current field)."""
+    from custom_components.bluetti_cloud.api.profiles import DeviceProfile
     from custom_components.bluetti_cloud.sensor import async_setup_entry
 
+    rest_only = DeviceProfile(
+        model="RESTONLY", protocol_ver_min=0, data_path="rest_only"
+    )
     coordinator = MagicMock()
     coordinator.data = {}
     coordinator._device_info = {}
     coordinator.get_pack_count.return_value = 0
-    coordinator.profile_for.return_value = AP300_PROFILE
+    coordinator.profile_for.return_value = rest_only
 
     entry = MagicMock()
     entry.runtime_data = coordinator
-    entry.data = {"devices": ["AP300SN"]}
+    entry.data = {"devices": ["RESTSN"]}
 
     added: list = []
     with patch("homeassistant.helpers.frame.report_usage"):
