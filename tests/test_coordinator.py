@@ -265,3 +265,49 @@ async def test_mqtt_disconnect_restores_rest_interval(
     assert coordinator.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
     # Verify reconnection was scheduled
     mock_reconnect.assert_called_once()
+
+
+def _load_ap300_fixtures():
+    """Load the real AP300 (APEX 300) REST fixtures captured from the device."""
+    import json
+    import pathlib
+
+    base = pathlib.Path(__file__).parent / "fixtures" / "apex300"
+    home = json.loads((base / "home_devices.json").read_text())
+    last_alive = json.loads((base / "last_alive.json").read_text())
+    return home, last_alive
+
+
+@pytest.mark.asyncio
+async def test_ap300_rest_only_maps_voltage_and_charging(
+    mock_hass, mock_config_entry
+):
+    """AP300 (rest_only): voltage and charging status come from REST."""
+    home, last_alive = _load_ap300_fixtures()
+    sn = home["sn"]
+
+    client = AsyncMock()
+    client.get_devices = AsyncMock(return_value=[home])
+    client.get_device_last_alive = AsyncMock(return_value=last_alive)
+    # AP300 energyDetail returns zeros in practice
+    client.get_energy_detail = AsyncMock(
+        return_value={"day": 0, "month": 0, "year": 0, "total": 0}
+    )
+
+    coordinator = _make_coordinator(
+        mock_hass, mock_config_entry, client, [sn], {sn: {"name": "APEX", "model": "AP300"}}
+    )
+
+    data = await coordinator._async_update_data()
+    dev = data[sn]
+
+    # Profile resolved to REST-only from model + factoryProtocolVer 2015
+    assert coordinator.profile_for(sn).data_path == "rest_only"
+    # Online + aggregate battery from REST
+    assert dev["online"] is True
+    assert dev["battery_soc"] == 95
+    assert dev["pack_voltage"] == 531.7  # from batteryVoltage
+    assert dev["charging_status"] == "standby"  # packChargingStatus 0
+    # Switch states readable (but not controllable)
+    assert dev["ac_switch"] is False
+    assert dev["dc_switch"] is False

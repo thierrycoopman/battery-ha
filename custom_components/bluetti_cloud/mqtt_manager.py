@@ -152,6 +152,14 @@ class BluettiMqttManager:
 
     # -- MQTT lifecycle --
 
+    def _has_mqtt_devices(self) -> bool:
+        """True if any configured device uses the MQTT data path."""
+        data = self._coordinator.data or {}
+        return any(
+            self._coordinator.profile_for(sn).data_path == "mqtt+rest"
+            for sn in data
+        )
+
     async def async_start(self) -> None:
         """Start MQTT client and subscribe to device telemetry topics.
 
@@ -161,6 +169,12 @@ class BluettiMqttManager:
         stale credential issues.
         """
         if self._mqtt_client and self._mqtt_client.is_connected:
+            return
+
+        # Skip MQTT entirely if no configured device uses it (e.g. an all
+        # REST-only setup like the AP300). Avoids pointless broker connections.
+        if not self._has_mqtt_devices():
+            _LOGGER.debug("No MQTT-capable devices configured — staying REST-only")
             return
 
         client = self._coordinator.client
@@ -191,9 +205,12 @@ class BluettiMqttManager:
         self._mqtt_connected = True
         self._reconnect_delay = MQTT_RECONNECT_MIN  # Reset backoff on success
 
-        # Subscribe to telemetry for all configured devices
+        # Subscribe to telemetry for MQTT-capable devices only. REST-only
+        # devices (e.g. AP300) do not speak this protocol, so skip them.
         if self._coordinator.data:
             for sn, dev_data in self._coordinator.data.items():
+                if self._coordinator.profile_for(sn).data_path != "mqtt+rest":
+                    continue
                 model = dev_data.get("device_type", "")
                 sub_sn = dev_data.get("sub_sn", "")
                 if model and sub_sn:
@@ -307,6 +324,9 @@ class BluettiMqttManager:
                     continue
 
                 for sn, dev_data in (self._coordinator.data or {}).items():
+                    if self._coordinator.profile_for(sn).data_path != "mqtt+rest":
+                        continue
+
                     model = dev_data.get("device_type", "")
                     sub_sn = dev_data.get("sub_sn", "")
                     if not model or not sub_sn:

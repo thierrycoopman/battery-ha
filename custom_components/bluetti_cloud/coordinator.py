@@ -23,7 +23,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api.client import BluettiCloudApi, BluettiCloudApiError
+from .api.modbus import BATTERY_STATE_MAP
 from .api.mqtt_client import BluettiMqttClient
+from .api.profiles import DeviceProfile, get_profile
 from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -136,12 +138,27 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._device_info = device_info
         # Cache last known data so entities don't go unavailable on transient errors
         self._last_good_data: dict[str, dict[str, Any]] = {}
+        # Per-device profile (data path, registers, switch semantics), resolved
+        # from the model + protocol version on each REST refresh.
+        self._profiles: dict[str, DeviceProfile] = {}
         # MQTT manager owns the real-time telemetry half of the integration
         self._mqtt = BluettiMqttManager(self)
 
     @property
     def client(self) -> BluettiCloudApi:
         return self._client
+
+    def profile_for(self, sn: str) -> DeviceProfile:
+        """Return the resolved device profile for a device SN.
+
+        Falls back to resolving from the configured model (protocol version 0)
+        if a REST refresh has not populated the profile yet.
+        """
+        profile = self._profiles.get(sn)
+        if profile is not None:
+            return profile
+        model = self._device_info.get(sn, {}).get("model", "")
+        return get_profile(model, 0)
 
     # -- MQTT delegation --
     #
@@ -284,6 +301,13 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "mqtt_active": False,
             }
 
+            # Resolve and cache the device profile (data path, registers,
+            # switch semantics) from the model + reported protocol version.
+            self._profiles[sn] = get_profile(
+                device_data["device_type"],
+                _safe_int(dev.get("factoryProtocolVer")) or 0,
+            )
+
             # Fetch detailed telemetry
             try:
                 alive_data = await self._client.get_device_last_alive(sn)
@@ -312,6 +336,19 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         val = _is_on(alive_data.get(field))
                         if val is not None:
                             device_data[key] = val
+
+                    # REST-only devices (e.g. AP300) source battery voltage and
+                    # charging status from getDeviceLastAlive; MQTT devices get
+                    # these from the overlay below, which takes precedence.
+                    voltage = _safe_float(alive_data.get("batteryVoltage"))
+                    if voltage is not None:
+                        device_data["pack_voltage"] = voltage
+
+                    charge_raw = _safe_int(alive_data.get("packChargingStatus"))
+                    if charge_raw is not None:
+                        device_data["charging_status"] = BATTERY_STATE_MAP.get(
+                            charge_raw, f"unknown({charge_raw})"
+                        )
 
                     ts = alive_data.get("timestamp")
                     if ts:
