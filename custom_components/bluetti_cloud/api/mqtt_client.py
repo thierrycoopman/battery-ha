@@ -32,7 +32,12 @@ import aiohttp
 import paho.mqtt.client as mqtt
 
 from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
-from .modbus import build_mqtt_payload, build_read_mqtt_payload, parse_mqtt_payload
+from .modbus import (
+    build_mqtt_payload,
+    build_node_info_query,
+    build_read_mqtt_payload,
+    parse_mqtt_payload,
+)
 from .totp import generate_totp
 
 _LOGGER = logging.getLogger(__name__)
@@ -525,6 +530,28 @@ class BluettiMqttClient:
             topic, register, count, slave_addr, payload_ver, payload.hex(),
         )
 
+        result = self._client.publish(topic, payload, qos=1)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise BluettiMqttError(
+                f"MQTT publish failed: {mqtt.error_string(result.rc)}"
+            )
+
+    def send_node_query(
+        self, model: str, sub_sn: str, version: int = 1, payload_ver: float = 1.2
+    ) -> None:
+        """Send a NODE_INFO (reg 21000) sub-device enumeration query.
+
+        This is a write-then-reply query; the device answers with a FC=0x10
+        frame (start_addr 21000) carrying the node list.
+        """
+        if not self._client or not self._connected:
+            raise BluettiMqttError("Not connected to MQTT broker")
+
+        topic = f"SUB/{model}/{sub_sn}"
+        payload = build_node_info_query(version, payload_ver)
+        _LOGGER.debug(
+            "MQTT node query %s: version=%d payload=%s", topic, version, payload.hex()
+        )
         result = self._client.publish(topic, payload, qos=1)
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise BluettiMqttError(
