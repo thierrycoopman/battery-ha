@@ -73,6 +73,14 @@ class DeviceProfile:
     ac_switch_reg: int | None = None
     dc_switch_reg: int | None = None
     switch_encoding: SwitchEncoding = "simple"
+    # ECO mode (idle-load auto-shutoff). None when the model doesn't expose it.
+    ac_eco_reg: int | None = None
+    dc_eco_reg: int | None = None
+
+    @property
+    def has_eco(self) -> bool:
+        """True if the device exposes ECO mode control."""
+        return self.ac_eco_reg is not None or self.dc_eco_reg is not None
 
     @property
     def controllable(self) -> bool:
@@ -122,6 +130,8 @@ AP300_PROFILE = DeviceProfile(
     ac_switch_reg=2011,
     dc_switch_reg=2012,
     switch_encoding="simple",
+    ac_eco_reg=2017,
+    dc_eco_reg=2014,
 )
 
 

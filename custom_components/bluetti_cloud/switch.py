@@ -55,6 +55,29 @@ SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
 ]
 
 
+# ECO mode switches — only created for devices whose profile declares them.
+ECO_SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
+    BluettiSwitchDescription(
+        key="ac_eco",
+        data_key="ac_eco",
+        name="AC ECO Mode",
+        icon="mdi:leaf",
+        register=0,  # resolved from the device profile at send time
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+    BluettiSwitchDescription(
+        key="dc_eco",
+        data_key="dc_eco",
+        name="DC ECO Mode",
+        icon="mdi:leaf",
+        register=0,
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+]
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BluettiConfigEntry,
@@ -71,6 +94,9 @@ async def async_setup_entry(
             continue
         for description in SWITCH_DESCRIPTIONS:
             entities.append(BluettiCloudSwitch(coordinator, sn, description))
+        if coordinator.profile_for(sn).has_eco:
+            for description in ECO_SWITCH_DESCRIPTIONS:
+                entities.append(BluettiCloudSwitch(coordinator, sn, description))
 
     async_add_entities(entities)
 
@@ -120,9 +146,12 @@ class BluettiCloudSwitch(BluettiCloudEntity, SwitchEntity):
         # use 3007/3008 with legacy framing, V2 devices 2011/2012 with the
         # 01F80F envelope and Modbus slave 0.
         profile = self.coordinator.profile_for(self._device_sn)
-        register = (
-            profile.ac_switch_reg if desc.key == "ac_switch" else profile.dc_switch_reg
-        )
+        register = {
+            "ac_switch": profile.ac_switch_reg,
+            "dc_switch": profile.dc_switch_reg,
+            "ac_eco": profile.ac_eco_reg,
+            "dc_eco": profile.dc_eco_reg,
+        }.get(desc.key)
         if register is None:
             _LOGGER.error("%s is not controllable on this device", desc.name)
             raise BluettiMqttError(f"{desc.name} is not controllable on this device")

@@ -35,6 +35,7 @@ from ..const import APP_ID, GW_PRIMARY_URL, GW_URL
 from .modbus import (
     build_node_info_query,
     build_read_mqtt_payload,
+    build_setting_payload,
     build_switch_payload,
     parse_mqtt_payload,
 )
@@ -534,6 +535,30 @@ class BluettiMqttClient:
             topic, register, count, slave_addr, payload_ver, payload.hex(),
         )
 
+        result = self._client.publish(topic, payload, qos=1)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise BluettiMqttError(
+                f"MQTT publish failed: {mqtt.error_string(result.rc)}"
+            )
+
+    def send_setting(
+        self, model: str, sub_sn: str, register: int, value: int,
+        slave_addr: int = 1, payload_ver: float = 1.0,
+    ) -> None:
+        """Send a guarded numeric setting write (FC=06).
+
+        Only registers with a documented range may be written, and only within
+        it — see build_setting_payload.
+        """
+        if not self._client or not self._connected:
+            raise BluettiMqttError("Not connected to MQTT broker")
+
+        topic = f"SUB/{model}/{sub_sn}"
+        payload = build_setting_payload(register, value, slave_addr, payload_ver)
+        _LOGGER.debug(
+            "MQTT setting %s: reg=%d val=%d payload=%s",
+            topic, register, value, payload.hex(),
+        )
         result = self._client.publish(topic, payload, qos=1)
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise BluettiMqttError(
