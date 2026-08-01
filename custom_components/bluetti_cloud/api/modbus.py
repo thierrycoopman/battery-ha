@@ -1017,7 +1017,8 @@ def parse_pack_cells(data: bytes) -> dict[str, Any]:
             break
         for raw in (data[off + 1], data[off]):
             if len(temps) < ntc_count:
-                temps.append(raw - 40)
+                # Unpopulated NTC slots read 0; report None, not -40 C.
+                temps.append(_temp_or_none(raw))
 
     result: dict[str, Any] = {
         "cell_count": cell_count,

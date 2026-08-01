@@ -85,3 +85,15 @@ def test_parsers_reject_short_payloads():
     for fn in (parse_inv_base_info, parse_inv_pv_info, parse_inv_grid_info,
                parse_inv_load_info, parse_inv_inv_info, parse_pack_cells):
         assert fn(bytes(4)) == {}
+
+
+def test_unreported_cell_temperatures_are_none():
+    """Real capture had 4 NTC slots with only 2 populated."""
+    cells = parse_pack_cells(_block(6300))
+    temps = cells["cell_temperatures"]
+    assert len(temps) == 4
+    # Populated sensors report a plausible ambient reading
+    real = [t for t in temps if t is not None]
+    assert real and all(-20 < t < 80 for t in real)
+    # Unpopulated slots are None, never -40
+    assert -40 not in temps
