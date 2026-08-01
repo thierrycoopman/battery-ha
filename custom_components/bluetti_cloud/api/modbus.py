@@ -33,7 +33,8 @@ NODE_INFO = 21000        # V2 sub-device (mesh node) registry — see build_node
 # Register counts for FC=03 reads (number of 16-bit registers)
 HOME_DATA_COUNT = 62         # 124 bytes
 PACK_MAIN_INFO_COUNT = 34    # 68 bytes
-PACK_ITEM_INFO_COUNT = 90    # 180 bytes
+PACK_ITEM_INFO_COUNT = 90    # 180 bytes (V1)
+PACK_ITEM_INFO_COUNT_V2 = 104  # 208 bytes — the count the app uses for V2
 
 # Modbus function codes
 FUNC_READ_HOLDING = 0x03

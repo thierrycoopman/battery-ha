@@ -35,6 +35,7 @@ from .api.modbus import (
     NODE_INFO,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT,
+    PACK_ITEM_INFO_COUNT_V2,
     PACK_MAIN_INFO,
     PACK_MAIN_INFO_COUNT,
     PACK_SELECT,
@@ -42,6 +43,7 @@ from .api.modbus import (
     parse_home_data,
     parse_node_info,
     parse_pack_item_info,
+    parse_pack_item_info_v2,
     parse_pack_main_info,
 )
 from .api.mqtt_client import BluettiMqttClient, BluettiMqttError
@@ -377,6 +379,11 @@ class BluettiMqttManager:
                         await self._poll_node_info(
                             sn, model, sub_sn, profile.iot_payload_ver
                         )
+                        # Then read each battery node's own record at its slave
+                        # address (per-battery model, SOC, cell count).
+                        await self._poll_battery_nodes(
+                            sn, model, sub_sn, profile.iot_payload_ver
+                        )
                     else:
                         # Legacy V1 poll path (slave 1, 0x01 framing).
                         await self._poll_register(
@@ -422,6 +429,22 @@ class BluettiMqttManager:
             _LOGGER.debug("Timeout waiting for node info: %s", sn)
         finally:
             self._pending_request = None
+
+    async def _poll_battery_nodes(
+        self, sn: str, model: str, sub_sn: str, payload_ver: float
+    ) -> None:
+        """Read each discovered battery node's own pack record (reg 6100).
+
+        V2 devices select a pack by addressing the read to that node's Modbus
+        slave address (from NODE_INFO) — no pack-select write is needed.
+        """
+        for node in self.get_nodes(sn):
+            if not node.get("is_battery"):
+                continue
+            await self._poll_register(
+                sn, model, sub_sn, PACK_ITEM_INFO, PACK_ITEM_INFO_COUNT_V2,
+                slave_addr=node["slave_addr"], payload_ver=payload_ver,
+            )
 
     async def _poll_register(
         self,
@@ -622,10 +645,52 @@ class BluettiMqttManager:
 
         self._push_mqtt_update()
 
+    def _process_pack_item_v2(
+        self, sn: str, register_data: bytes, slave_addr: int
+    ) -> None:
+        """Store a V2 per-battery record, keyed by the node's slave address.
+
+        Merges into the matching entry of the node list so each battery carries
+        its own model, SOC and cell count. Fields the device leaves at zero
+        (voltage/current/SOH while idle) are not written.
+        """
+        pack = parse_pack_item_info_v2(register_data)
+        if not pack or not pack.get("pack_type"):
+            return
+
+        _LOGGER.debug(
+            "MQTT pack item (V2) for %s slave=%d: type=%s soc=%s cells=%s",
+            sn, slave_addr, pack.get("pack_type"),
+            pack.get("pack_soc"), pack.get("total_cell_count"),
+        )
+
+        mqtt_overlay = self.overlays.setdefault(sn, {})
+        nodes = mqtt_overlay.get("nodes") or []
+        for node in nodes:
+            if node.get("slave_addr") != slave_addr:
+                continue
+            node["pack_model"] = pack.get("pack_type")
+            node["pack_serial"] = pack.get("pack_sn")
+            if pack.get("pack_soc"):
+                node["pack_soc"] = pack["pack_soc"]
+            if pack.get("total_cell_count"):
+                node["cell_count"] = pack["total_cell_count"]
+            if pack.get("pack_voltage"):
+                node["pack_voltage"] = pack["pack_voltage"]
+            break
+
+        mqtt_overlay["mqtt_active"] = True
+        self._push_mqtt_update()
+
     def _route_register_data(
         self, sn: str, register: int, slave_addr: int, register_data: bytes
     ) -> None:
         """Route register data to the appropriate parser based on register address."""
+        # V2 per-battery records are addressed to a node's slave address and use
+        # the V2 layout (swapped ASCII, /100 voltage) — route them separately.
+        if register == PACK_ITEM_INFO and slave_addr >= 41:
+            self._process_pack_item_v2(sn, register_data, slave_addr)
+            return
         if register == HOME_DATA:
             self._process_home_data(sn, register_data)
         elif register == PACK_MAIN_INFO:
