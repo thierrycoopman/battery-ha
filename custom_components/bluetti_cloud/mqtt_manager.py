@@ -965,17 +965,19 @@ class BluettiMqttManager:
             if field in home_data:
                 mqtt_overlay[field] = home_data[field]
 
-        # On V2 devices the homeData ctrl bits do NOT track output state (that
-        # is why INV_BASE_SETTINGS exists), so letting them write ac/dc_switch
-        # here would clobber the authoritative value and flip the UI back.
+        # On V2 devices these ctrl bits do not track state: they read 0 for an
+        # output that is demonstrably on, and toggling ECO moved an unrelated
+        # bit rather than an eco bit. Their layout also differs from V1, so a
+        # bit read here may not even mean what its name says. Switch state
+        # comes from the settings blocks and REST instead — measured sources
+        # rather than a bitfield we cannot trust.
         is_v2 = (
             self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2
         )
-        for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
-            if is_v2 and switch_key in ("ac_switch", "dc_switch"):
-                continue
-            if ctrl_key in home_data:
-                mqtt_overlay[switch_key] = home_data[ctrl_key]
+        if not is_v2:
+            for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
+                if ctrl_key in home_data:
+                    mqtt_overlay[switch_key] = home_data[ctrl_key]
 
         # homeData carries the aggregate battery voltage/current; surface them
         # via the "Battery Total Voltage"/"Current" sensors (pack_total_*). For
