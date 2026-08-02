@@ -6,7 +6,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import BluettiCloudCoordinator
+from .coordinator import BluettiCloudCoordinator, is_device_reachable
 
 
 class BluettiCloudEntity(CoordinatorEntity[BluettiCloudCoordinator]):
@@ -60,14 +60,16 @@ class BluettiCloudEntity(CoordinatorEntity[BluettiCloudCoordinator]):
 
     @property
     def available(self) -> bool:
-        """Return True if coordinator has run and device has data.
+        """True while the device has been heard from recently enough to trust.
 
-        We do NOT require the device to be "online" — cloud data may be
-        slightly stale but still valid. Sensors should show last known values
-        rather than going unavailable.
+        Brief staleness is tolerated — cloud data lags and a missed poll is
+        normal — but a device that has gone quiet for a long stretch (powered
+        off, unplugged, off the network) should not keep presenting hours-old
+        readings as current.
         """
-        return (
-            super().available
-            and self.coordinator.data is not None
-            and self._device_sn in self.coordinator.data
-        )
+        if not super().available or self.coordinator.data is None:
+            return False
+        device_data = self.coordinator.data.get(self._device_sn)
+        if device_data is None:
+            return False
+        return is_device_reachable(device_data)

@@ -353,6 +353,8 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             try:
                 alive_data = await self._client.get_device_last_alive(sn)
                 if alive_data and not alive_data.get("allFieldIsNull"):
+                    # Real telemetry means the cloud has heard from the device.
+                    device_data["last_seen"] = time.time()
                     soc = _safe_int(alive_data.get("batterySoc"))
                     if soc is not None:
                         device_data["battery_soc"] = soc
@@ -421,6 +423,11 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             mqtt_overlay = self._mqtt_data.get(sn)
             if mqtt_overlay:
                 device_data.update(mqtt_overlay)
+
+            # Keep the most recent contact time from either transport.
+            previous = self._last_good_data.get(sn, {}).get("last_seen")
+            if previous and previous > device_data.get("last_seen", 0):
+                device_data["last_seen"] = previous
 
             result[sn] = device_data
 

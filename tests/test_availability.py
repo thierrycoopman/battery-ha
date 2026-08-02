@@ -46,3 +46,38 @@ def test_boundary_is_inclusive_of_recent_data():
 
     just_inside = time.time() - (DEVICE_STALE_AFTER - 5)
     assert is_device_reachable({"last_seen": just_inside}) is True
+
+
+def test_entities_go_unavailable_when_device_is_stale():
+    """Stale readings must not be presented as current."""
+    from custom_components.bluetti_cloud.sensor import (
+        SENSOR_DESCRIPTIONS,
+        BluettiCloudSensor,
+    )
+
+    coord = MagicMock()
+    coord.last_update_success = True
+    coord._device_info = {}
+    coord.data = {"SN": {"battery_soc": 94, "last_seen": time.time()}}
+    desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "battery_soc")
+    sensor = BluettiCloudSensor(coord, "SN", desc)
+    assert sensor.available is True
+
+    coord.data["SN"]["last_seen"] = time.time() - (DEVICE_STALE_AFTER + 60)
+    assert sensor.available is False
+
+
+def test_reachable_sensor_stays_available_to_report_unreachable():
+    """The reachability sensor itself must not disappear when the device does."""
+    from custom_components.bluetti_cloud.binary_sensor import (
+        REACHABLE_DESCRIPTION,
+        BluettiReachableBinarySensor,
+    )
+
+    coord = MagicMock()
+    coord.last_update_success = True
+    coord._device_info = {}
+    coord.data = {"SN": {"last_seen": time.time() - (DEVICE_STALE_AFTER + 60)}}
+    sensor = BluettiReachableBinarySensor(coord, "SN", REACHABLE_DESCRIPTION)
+    assert sensor.available is True
+    assert sensor.is_on is False

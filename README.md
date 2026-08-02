@@ -146,6 +146,7 @@ Created automatically as batteries are discovered. How they appear depends on th
 ### Binary Sensors
 | Entity | Description |
 |--------|-------------|
+| Device Reachable | Whether the device has been heard from recently |
 | Cloud Connected | Device cloud connectivity status |
 | IoT Session | Device IoT session status |
 

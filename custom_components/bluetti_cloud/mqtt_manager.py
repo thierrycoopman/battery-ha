@@ -579,6 +579,9 @@ class BluettiMqttManager:
             _LOGGER.debug("MQTT message on unknown topic: %s", topic)
             return
 
+        # Any frame at all proves the device is reachable right now.
+        self._note_seen(sn)
+
         fc = parsed.get("function_code")
 
         if parsed.get("is_error"):
@@ -740,6 +743,10 @@ class BluettiMqttManager:
     def _note_push(self, sn: str) -> None:
         """Record that a device pushed telemetry unprompted."""
         self._last_push[sn] = time.monotonic()
+
+    def _note_seen(self, sn: str) -> None:
+        """Record that we heard from the device (any parsed frame)."""
+        self.overlays.setdefault(sn, {})["last_seen"] = time.time()
 
     def is_streaming(self, sn: str) -> bool:
         """True if the device pushed telemetry recently enough to skip polling."""
