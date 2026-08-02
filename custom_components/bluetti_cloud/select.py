@@ -103,6 +103,7 @@ class BluettiChargingModeSelect(BluettiCloudEntity, SelectEntity):
         )
         _LOGGER.info("Set charging mode to %s (%d)", option, value)
 
-        # Optimistic update, confirmed by the device's next state push.
+        # Hold the new option until the device's next state push confirms it.
         self._attr_current_option = option
+        self.set_optimistic(self.entity_description.data_key, option)
         self.async_write_ha_state()

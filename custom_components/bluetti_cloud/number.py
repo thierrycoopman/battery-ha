@@ -149,8 +149,9 @@ class BluettiCloudNumber(BluettiCloudEntity, NumberEntity):
         )
         _LOGGER.info("Set %s to %s (reg=%d)", desc.name, int(value), desc.register)
 
-        # Optimistic update, confirmed by the device's next state push.
+        # Hold the new value until the device's next state push confirms it.
         self._attr_native_value = value
+        self.set_optimistic(desc.data_key, int(value))
         self.async_write_ha_state()
 
     @property

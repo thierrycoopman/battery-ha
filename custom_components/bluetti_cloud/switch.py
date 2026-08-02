@@ -202,9 +202,11 @@ class BluettiCloudSwitch(BluettiCloudEntity, SwitchEntity):
             _LOGGER.error("MQTT command failed for %s: %s", desc.name, err)
             raise
 
-        # Optimistic update — assume command succeeded for responsive UI.
-        # Will be confirmed/corrected by MQTT write echo or next REST poll.
-        self._attr_is_on = value == desc.on_value
+        # Assume the command succeeded so the UI responds immediately; the
+        # device's next state report confirms or corrects it.
+        new_state = value == desc.on_value
+        self._attr_is_on = new_state
+        self.set_optimistic(desc.data_key, new_state)
         self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs: Any) -> None:

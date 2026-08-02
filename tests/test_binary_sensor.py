@@ -36,7 +36,8 @@ async def test_rest_only_device_gets_output_state_sensors():
     with patch("homeassistant.helpers.frame.report_usage"):
         await async_setup_entry(MagicMock(), entry, added.extend)
 
-    assert len(added) == len(BINARY_SENSOR_DESCRIPTIONS) + len(OUTPUT_STATE_DESCRIPTIONS)
+    # +1 for the always-present Device Reachable sensor
+    assert len(added) == len(BINARY_SENSOR_DESCRIPTIONS) + len(OUTPUT_STATE_DESCRIPTIONS) + 1
     keys = {e.entity_description.key for e in added}
     assert "ac_output_state" in keys
     assert "dc_output_state" in keys
@@ -54,9 +55,10 @@ async def test_mqtt_device_gets_no_output_state_sensors():
     with patch("homeassistant.helpers.frame.report_usage"):
         await async_setup_entry(MagicMock(), entry, added.extend)
 
-    assert len(added) == len(BINARY_SENSOR_DESCRIPTIONS)
+    assert len(added) == len(BINARY_SENSOR_DESCRIPTIONS) + 1  # + Device Reachable
     keys = {e.entity_description.key for e in added}
     assert "ac_output_state" not in keys
+    assert "reachable" in keys
 
 
 @pytest.mark.asyncio

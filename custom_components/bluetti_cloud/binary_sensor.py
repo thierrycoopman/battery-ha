@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from homeassistant.components.binary_sensor import (
@@ -11,8 +12,13 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
-from .coordinator import BluettiCloudCoordinator, BluettiConfigEntry
+from .coordinator import (
+    BluettiCloudCoordinator,
+    BluettiConfigEntry,
+    is_device_reachable,
+)
 from .entity import BluettiCloudEntity
 
 
@@ -44,6 +50,14 @@ BINARY_SENSOR_DESCRIPTIONS: list[BluettiBinarySensorDescription] = [
 # Read-only output-state sensors for REST-only devices (e.g. AP300 / APEX 300),
 # which expose AC/DC/PV/grid switch states over REST but cannot be controlled.
 # MQTT-capable devices (AC300) get real controllable switches instead.
+REACHABLE_DESCRIPTION = BluettiBinarySensorDescription(
+    key="reachable",
+    data_key="last_seen",
+    name="Device Reachable",
+    device_class=BinarySensorDeviceClass.CONNECTIVITY,
+    icon="mdi:access-point-network",
+)
+
 OUTPUT_STATE_DESCRIPTIONS: list[BluettiBinarySensorDescription] = [
     BluettiBinarySensorDescription(
         key="ac_output_state",
@@ -90,6 +104,9 @@ async def async_setup_entry(
             entities.append(
                 BluettiCloudBinarySensor(coordinator, sn, description)
             )
+        entities.append(
+            BluettiReachableBinarySensor(coordinator, sn, REACHABLE_DESCRIPTION)
+        )
 
         # Devices we can't control — surface their AC/DC/PV/grid output states
         # as read-only binary sensors instead of switches. (This covers both
@@ -193,3 +210,35 @@ class BluettiCloudNodeBinarySensor(BluettiCloudEntity, BinarySensorEntity):
             if key in node:
                 attrs[key] = node[key]
         return attrs
+
+
+class BluettiReachableBinarySensor(BluettiCloudBinarySensor):
+    """Whether the device has been heard from recently.
+
+    Reports reachability, not power state: the cloud API exposes no dependable
+    power signal, so a device that is switched off and one that has lost its
+    network connection look identical from here.
+    """
+
+    # Must stay available in order to report that the device is not.
+    @property
+    def available(self) -> bool:
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data is not None
+            and self._device_sn in self.coordinator.data
+        )
+
+    @property
+    def is_on(self) -> bool:
+        return is_device_reachable(self.device_data)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        last_seen = self.device_data.get("last_seen")
+        if not last_seen:
+            return {"last_seen": None}
+        return {
+            "last_seen": dt_util.utc_from_timestamp(last_seen).isoformat(),
+            "seconds_since_contact": int(time.time() - last_seen),
+        }

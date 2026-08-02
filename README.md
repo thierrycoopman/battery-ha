@@ -146,6 +146,7 @@ Created automatically as batteries are discovered. How they appear depends on th
 ### Binary Sensors
 | Entity | Description |
 |--------|-------------|
+| Device Reachable | Whether the device has been heard from recently |
 | Cloud Connected | Device cloud connectivity status |
 | IoT Session | Device IoT session status |
 
@@ -242,6 +243,25 @@ remove the integration: go to **Settings → Devices & Services → Bluetti Clou
 ⋮ → Reconfigure** and tick the new device. Existing entities and history are
 preserved.
 
+### Offline and stale data
+
+**Device Reachable** reports whether the device has actually been heard from —
+over either MQTT or the cloud API — within the last 10 minutes. If it goes
+quiet for longer, its other entities become *unavailable* rather than
+continuing to display hours-old readings as though they were current.
+
+> This is **reachability, not power state**. A device that is switched off and
+> one that has lost its network connection look identical from the cloud API —
+> there is no dependable power signal to read. The protocol's own "power" bit
+> reads 0 on a device that is demonstrably running, and the cloud's
+> `sessionState` reports Offline for devices whose MQTT link works fine. So
+> `Device Reachable = off` means "not heard from": powered down, unplugged, or
+> simply off the network.
+
+The Device Reachable sensor stays available even when the device does not, so
+it can report the outage. It exposes `last_seen` and `seconds_since_contact`
+attributes for automations.
+
 ## A Note on Device Writes
 
 This integration writes to your device over Bluetti's own protocol. Writes are
@@ -318,7 +338,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (235 tests) and lint
+# Run tests (244 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```

@@ -24,8 +24,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .api.modbus import (
+    AC_ECO_MODE,
     AC_SWITCH,
     AC_SWITCH_V2,
+    CTRL_FEED,
+    CTRL_GRID,
+    DC_ECO_MODE,
     DC_SWITCH,
     DC_SWITCH_V2,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
@@ -123,6 +127,10 @@ _REGISTER_TO_SWITCH = {
     DC_SWITCH: "dc_switch",
     AC_SWITCH_V2: "ac_switch",
     DC_SWITCH_V2: "dc_switch",
+    AC_ECO_MODE: "ac_eco",
+    DC_ECO_MODE: "dc_eco",
+    CTRL_GRID: "grid_charge",
+    CTRL_FEED: "feed_in",
 }
 
 
@@ -571,6 +579,9 @@ class BluettiMqttManager:
             _LOGGER.debug("MQTT message on unknown topic: %s", topic)
             return
 
+        # Any frame at all proves the device is reachable right now.
+        self._note_seen(sn)
+
         fc = parsed.get("function_code")
 
         if parsed.get("is_error"):
@@ -732,6 +743,10 @@ class BluettiMqttManager:
     def _note_push(self, sn: str) -> None:
         """Record that a device pushed telemetry unprompted."""
         self._last_push[sn] = time.monotonic()
+
+    def _note_seen(self, sn: str) -> None:
+        """Record that we heard from the device (any parsed frame)."""
+        self.overlays.setdefault(sn, {})["last_seen"] = time.time()
 
     def is_streaming(self, sn: str) -> bool:
         """True if the device pushed telemetry recently enough to skip polling."""

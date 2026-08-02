@@ -17,3 +17,8 @@ MQTT_RECONNECT_MAX = 300  # seconds — max reconnect delay (5 minutes)
 # A V2 device that pushed telemetry within this many seconds is considered
 # to be streaming, so the poll loop skips its redundant reads.
 PUSH_ACTIVE_WINDOW = 30
+
+# A device that has not been heard from for this long is treated as
+# unreachable, so entities stop presenting stale readings as current.
+# Generous enough to survive a missed poll or a brief network blip.
+DEVICE_STALE_AFTER = 600  # seconds

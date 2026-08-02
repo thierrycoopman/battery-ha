@@ -14,6 +14,7 @@ REST fills in fields MQTT cannot provide.
 """
 
 import logging
+import time
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -28,6 +29,7 @@ from .api.mqtt_client import BluettiMqttClient
 from .api.profiles import DeviceProfile, get_profile
 from .const import (
     DEFAULT_SCAN_INTERVAL,
+    DEVICE_STALE_AFTER,
     DOMAIN,
 )
 from .mqtt_manager import BluettiMqttManager
@@ -64,6 +66,20 @@ def _is_on(value: Any) -> bool | None:
     if value is None:
         return None
     return str(value) not in ("0", "", "false", "False", "None")
+
+
+def is_device_reachable(device_data: dict[str, Any]) -> bool:
+    """True if the device has produced real data recently enough to trust.
+
+    There is no dependable power-state signal in the cloud API — the V2 ctrl
+    power bit reads 0 on a device that is powered on, and REST sessionState
+    reports Offline for devices whose MQTT link is working. So reachability is
+    judged by whether the device has actually been heard from.
+    """
+    last_seen = device_data.get("last_seen")
+    if not last_seen:
+        return False
+    return (time.time() - last_seen) < DEVICE_STALE_AFTER
 
 
 def _normalize_iot_session(value: Any) -> str | None:
@@ -337,6 +353,8 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             try:
                 alive_data = await self._client.get_device_last_alive(sn)
                 if alive_data and not alive_data.get("allFieldIsNull"):
+                    # Real telemetry means the cloud has heard from the device.
+                    device_data["last_seen"] = time.time()
                     soc = _safe_int(alive_data.get("batterySoc"))
                     if soc is not None:
                         device_data["battery_soc"] = soc
@@ -405,6 +423,11 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             mqtt_overlay = self._mqtt_data.get(sn)
             if mqtt_overlay:
                 device_data.update(mqtt_overlay)
+
+            # Keep the most recent contact time from either transport.
+            previous = self._last_good_data.get(sn, {}).get("last_seen")
+            if previous and previous > device_data.get("last_seen", 0):
+                device_data["last_seen"] = previous
 
             result[sn] = device_data
 
