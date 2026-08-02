@@ -893,6 +893,7 @@ INV_GRID_INFO = 1300     # grid frequency / per-phase / import-export energy
 INV_LOAD_INFO = 1400     # AC + DC load breakdown
 INV_INV_INFO = 1500      # inverter output
 PACK_CELL_INFO = 6300    # per-cell voltages + NTC temperatures
+PACK_CELL_INFO_COUNT = 25  # 50 bytes
 
 
 def _temp_or_none(raw: int) -> int | None:

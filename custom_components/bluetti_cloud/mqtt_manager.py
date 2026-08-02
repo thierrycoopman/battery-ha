@@ -50,6 +50,7 @@ from .api.modbus import (
     IOT_PAYLOAD_VER_V2,
     NODE_INFO,
     PACK_CELL_INFO,
+    PACK_CELL_INFO_COUNT,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT,
     PACK_ITEM_INFO_COUNT_V2,
@@ -525,6 +526,11 @@ class BluettiMqttManager:
                 sn, model, sub_sn, PACK_ITEM_INFO, PACK_ITEM_INFO_COUNT_V2,
                 slave_addr=slave, payload_ver=payload_ver,
             )
+            # Cell detail (voltages, balance spread, NTC temps) for this pack.
+            await self._poll_register(
+                sn, model, sub_sn, PACK_CELL_INFO, PACK_CELL_INFO_COUNT,
+                slave_addr=slave, payload_ver=payload_ver,
+            )
 
     async def _poll_register(
         self,
@@ -787,6 +793,28 @@ class BluettiMqttManager:
         mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()
 
+    def _process_pack_cells_for_node(
+        self, sn: str, register_data: bytes, slave_addr: int
+    ) -> None:
+        """Attach cell detail to the pack that reported it."""
+        cells = parse_pack_cells(register_data)
+        if not cells.get("cell_count"):
+            return
+        overlay = self.overlays.setdefault(sn, {})
+        for node in overlay.get("nodes") or []:
+            if node.get("slave_addr") != slave_addr:
+                continue
+            node["cell_count"] = cells["cell_count"]
+            if cells.get("cell_voltage_delta") is not None:
+                node["cell_voltage_delta"] = cells["cell_voltage_delta"]
+                node["cell_voltage_min"] = cells.get("cell_voltage_min")
+                node["cell_voltage_max"] = cells.get("cell_voltage_max")
+            temps = [t for t in cells.get("cell_temperatures", []) if t is not None]
+            if temps:
+                node["pack_temperature"] = max(temps)
+            break
+        self._push_mqtt_update()
+
     def _process_pack_item_v2(
         self, sn: str, register_data: bytes, slave_addr: int
     ) -> None:
@@ -821,6 +849,8 @@ class BluettiMqttManager:
                 node["pack_soc"] = pack["pack_soc"]
             if pack.get("total_cell_count"):
                 node["cell_count"] = pack["total_cell_count"]
+            if pack.get("pack_average_temp") is not None:
+                node["pack_temperature"] = pack["pack_average_temp"]
             if pack.get("pack_voltage"):
                 node["pack_voltage"] = pack["pack_voltage"]
             break
@@ -832,11 +862,19 @@ class BluettiMqttManager:
         self, sn: str, register: int, slave_addr: int, register_data: bytes
     ) -> None:
         """Route register data to the appropriate parser based on register address."""
-        # V2 per-battery records are addressed to a node's slave address and use
-        # the V2 layout (swapped ASCII, /100 voltage) — route them separately.
-        if register == PACK_ITEM_INFO and slave_addr >= 41:
+        # V2 pack records use the V2 layout (swapped ASCII, /100 voltage).
+        # This includes the main unit's own internal pack at slave 0, so the
+        # routing must not be limited to expansion slave addresses.
+        is_v2 = (
+            self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2
+        )
+        if register == PACK_ITEM_INFO and is_v2:
             self._process_pack_item_v2(sn, register_data, slave_addr)
             return
+        if register == PACK_CELL_INFO and slave_addr:
+            self._process_pack_cells_for_node(sn, register_data, slave_addr)
+            return
+
         block_parser = _BLOCK_PARSERS.get(register)
         if block_parser is not None:
             self._process_block(sn, register, block_parser, register_data)
