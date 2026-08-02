@@ -41,7 +41,11 @@ def _real_cell_block() -> bytes:
 def test_cell_sized_payload_is_not_decoded_as_a_pack_record():
     """This is the exact failure seen live: SOC 252, 33.24 V, 3284 C."""
     mgr = _manager()
-    mgr._route_register_data(PARENT, 6100, 51, _real_cell_block())
+    mgr._handle_telemetry_data(PARENT, {
+        "function_code": 0x03,
+        "register_data": _real_cell_block(),
+        "slave_addr": 51,
+    })
     node = mgr.overlays[PARENT]["nodes"][0]
     assert "pack_soc" not in node
     assert "pack_voltage" not in node
@@ -50,7 +54,11 @@ def test_cell_sized_payload_is_not_decoded_as_a_pack_record():
 
 def test_pack_sized_payload_is_not_decoded_as_cells():
     mgr = _manager()
-    mgr._route_register_data(PARENT, 6300, 51, bytes(208))  # pack-sized
+    mgr._handle_telemetry_data(PARENT, {
+        "function_code": 0x03,
+        "register_data": bytes(208),   # pack-sized, not cells
+        "slave_addr": 51,
+    })
     node = mgr.overlays[PARENT]["nodes"][0]
     assert "cell_voltage_delta" not in node
 
@@ -64,7 +72,11 @@ def test_correctly_sized_payloads_still_decode():
     for i in range(6):
         pack[2 + i * 2] = raw[i * 2 + 1]
         pack[3 + i * 2] = raw[i * 2]
-    mgr._route_register_data(PARENT, 6100, 51, bytes(pack))
+    mgr._handle_telemetry_data(PARENT, {
+        "function_code": 0x03,
+        "register_data": bytes(pack),
+        "slave_addr": 51,
+    })
     node = mgr.overlays[PARENT]["nodes"][0]
     assert node["pack_soc"] == 94
     assert node["pack_model"] == "B300"

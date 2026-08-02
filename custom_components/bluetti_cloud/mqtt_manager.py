@@ -610,9 +610,20 @@ class BluettiMqttManager:
         if not register_data:
             return
 
-        # Determine which parser to use based on the pending request.
+        # Identify the block from the reply itself; fall back to the pending
+        # request only when the length is ambiguous. The reply's slave byte is
+        # authoritative for which pack sent it.
         pending = self._pending_request
-        if pending is not None:
+        identified = self.identify_block(len(register_data))
+        frame_slave = parsed.get("slave_addr")
+
+        if identified is not None:
+            register = identified
+            slave_addr = (
+                frame_slave if frame_slave
+                else (pending[1] if pending else 1)
+            )
+        elif pending is not None:
             register, slave_addr = pending
         else:
             # Unsolicited frame: the device pushes FC=03 data with no
@@ -755,6 +766,29 @@ class BluettiMqttManager:
         """Record that a device pushed telemetry unprompted."""
         self._last_push[sn] = time.monotonic()
 
+    # FC=03 replies carry no register address and can arrive after the pending
+    # request has moved on, so the block is identified from the reply's own
+    # length rather than from what was last asked for.
+    _BLOCK_BY_SIZE: dict[int, int] = {
+        HOME_DATA_COUNT * 2: HOME_DATA,               # 124
+        INV_BASE_SETTINGS_COUNT * 2: INV_BASE_SETTINGS,  # 60
+        INV_ADV_SETTINGS_COUNT * 2: INV_ADV_SETTINGS,    # 40
+        PACK_MAIN_INFO_COUNT * 2: PACK_MAIN_INFO,        # 68
+        PACK_ITEM_INFO_COUNT_V2 * 2: PACK_ITEM_INFO,     # 208
+    }
+    # The cell block's length varies with cell count, so it is matched by range.
+    _CELL_SIZE_RANGE = (20, 60)
+
+    def identify_block(self, size: int) -> int | None:
+        """Which register block a reply of this size represents, if unambiguous."""
+        block = self._BLOCK_BY_SIZE.get(size)
+        if block is not None:
+            return block
+        low, high = self._CELL_SIZE_RANGE
+        if low <= size <= high:
+            return PACK_CELL_INFO
+        return None
+
     def _note_seen(self, sn: str) -> None:
         """Record that we heard from the device (any parsed frame)."""
         self.overlays.setdefault(sn, {})["last_seen"] = time.time()
@@ -858,40 +892,10 @@ class BluettiMqttManager:
         mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()
 
-    # A reply can arrive after the pending request has moved on, so the
-    # register alone does not prove which block a payload is. Each block has a
-    # characteristic size; anything outside it is rejected rather than decoded
-    # with the wrong layout (which yields plausible-looking nonsense).
-    _MIN_BYTES = {
-        PACK_ITEM_INFO: 150,      # device sends 208
-        INV_BASE_SETTINGS: 40,    # device sends 60+
-    }
-    _MAX_BYTES = {
-        PACK_CELL_INFO: 80,       # device sends 44-50
-    }
-
-    def _payload_fits(self, register: int, size: int) -> bool:
-        """True if a payload is a plausible size for the block it claims to be."""
-        low = self._MIN_BYTES.get(register)
-        if low is not None and size < low:
-            return False
-        high = self._MAX_BYTES.get(register)
-        if high is not None and size > high:
-            return False
-        return True
-
     def _route_register_data(
         self, sn: str, register: int, slave_addr: int, register_data: bytes
     ) -> None:
         """Route register data to the appropriate parser based on register address."""
-        if not self._payload_fits(register, len(register_data)):
-            _LOGGER.debug(
-                "Discarding %d-byte payload for %s reg=%d — wrong size for that "
-                "block, likely a reply that overtook its request",
-                len(register_data), sn, register,
-            )
-            return
-
         # V2 pack records use the V2 layout (swapped ASCII, /100 voltage).
         # This includes the main unit's own internal pack at slave 0, so the
         # routing must not be limited to expansion slave addresses.

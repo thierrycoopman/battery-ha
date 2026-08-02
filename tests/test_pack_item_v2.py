@@ -28,14 +28,14 @@ def test_parse_v2_pack_item_real_payload():
 
 def test_v2_voltage_uses_hundredths():
     # voltage at bytes 22-23, /100 (V2 per-pack convention)
-    data = bytearray(60)
+    data = bytearray(208)  # a real V2 pack record
     data[22:24] = (5313).to_bytes(2, "big")
     p = parse_pack_item_info_v2(bytes(data))
     assert p["pack_voltage"] == 53.13
 
 
 def test_v2_temperature_offset_is_minus_40():
-    data = bytearray(60)
+    data = bytearray(208)  # a real V2 pack record
     data[30:32] = (65).to_bytes(2, "big")
     p = parse_pack_item_info_v2(bytes(data))
     assert p["pack_average_temp"] == 25
@@ -43,5 +43,5 @@ def test_v2_temperature_offset_is_minus_40():
 
 def test_v2_zero_temperature_is_none_not_minus_40():
     # The app leaves an unguarded -40 on empty records; we surface None instead.
-    p = parse_pack_item_info_v2(bytes(60))
+    p = parse_pack_item_info_v2(bytes(208))
     assert p["pack_average_temp"] is None

@@ -1129,7 +1129,10 @@ def parse_pack_item_info_v2(data: bytes) -> dict[str, Any]:
     divisor and the -40 (not -41) temperature offset.
     """
     result: dict[str, Any] = {}
-    if len(data) < 32:
+    # A real V2 pack record is 208 bytes. Anything much shorter is a different
+    # block that reached here by mistake; decoding it would yield plausible-
+    # looking nonsense (a cell block once decoded as SOC 252 at 33.24 V).
+    if len(data) < 100:
         return result
 
     result["pack_id"] = data[1]
