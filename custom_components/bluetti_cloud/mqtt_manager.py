@@ -24,8 +24,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .api.modbus import (
+    AC_ECO_MODE,
     AC_SWITCH,
     AC_SWITCH_V2,
+    CTRL_FEED,
+    CTRL_GRID,
+    DC_ECO_MODE,
     DC_SWITCH,
     DC_SWITCH_V2,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
@@ -123,6 +127,10 @@ _REGISTER_TO_SWITCH = {
     DC_SWITCH: "dc_switch",
     AC_SWITCH_V2: "ac_switch",
     DC_SWITCH_V2: "dc_switch",
+    AC_ECO_MODE: "ac_eco",
+    DC_ECO_MODE: "dc_eco",
+    CTRL_GRID: "grid_charge",
+    CTRL_FEED: "feed_in",
 }
 
 

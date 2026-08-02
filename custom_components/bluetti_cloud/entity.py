@@ -38,6 +38,19 @@ class BluettiCloudEntity(CoordinatorEntity[BluettiCloudCoordinator]):
             serial_number=device_sn,
         )
 
+    def set_optimistic(self, key: str, value: Any) -> None:
+        """Record a value we just wrote so the UI holds it until confirmed.
+
+        Writing only to _attr_* is not enough: the entity properties read from
+        the coordinator's device data, which still holds the pre-write value —
+        so the UI would snap back within a second and the change would look
+        like it never registered. The device overwrites this on its next state
+        report.
+        """
+        data = self.coordinator.data
+        if data and self._device_sn in data:
+            data[self._device_sn][key] = value
+
     @property
     def device_data(self) -> dict[str, Any]:
         """Return the coordinator data for this device."""
