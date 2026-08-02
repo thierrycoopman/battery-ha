@@ -858,10 +858,40 @@ class BluettiMqttManager:
         mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()
 
+    # A reply can arrive after the pending request has moved on, so the
+    # register alone does not prove which block a payload is. Each block has a
+    # characteristic size; anything outside it is rejected rather than decoded
+    # with the wrong layout (which yields plausible-looking nonsense).
+    _MIN_BYTES = {
+        PACK_ITEM_INFO: 150,      # device sends 208
+        INV_BASE_SETTINGS: 40,    # device sends 60+
+    }
+    _MAX_BYTES = {
+        PACK_CELL_INFO: 80,       # device sends 44-50
+    }
+
+    def _payload_fits(self, register: int, size: int) -> bool:
+        """True if a payload is a plausible size for the block it claims to be."""
+        low = self._MIN_BYTES.get(register)
+        if low is not None and size < low:
+            return False
+        high = self._MAX_BYTES.get(register)
+        if high is not None and size > high:
+            return False
+        return True
+
     def _route_register_data(
         self, sn: str, register: int, slave_addr: int, register_data: bytes
     ) -> None:
         """Route register data to the appropriate parser based on register address."""
+        if not self._payload_fits(register, len(register_data)):
+            _LOGGER.debug(
+                "Discarding %d-byte payload for %s reg=%d — wrong size for that "
+                "block, likely a reply that overtook its request",
+                len(register_data), sn, register,
+            )
+            return
+
         # V2 pack records use the V2 layout (swapped ASCII, /100 voltage).
         # This includes the main unit's own internal pack at slave 0, so the
         # routing must not be limited to expansion slave addresses.
