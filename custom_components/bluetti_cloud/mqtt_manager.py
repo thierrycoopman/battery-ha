@@ -50,6 +50,7 @@ from .api.modbus import (
     IOT_PAYLOAD_VER_V2,
     NODE_INFO,
     PACK_CELL_INFO,
+    PACK_CELL_INFO_COUNT,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT,
     PACK_ITEM_INFO_COUNT_V2,
@@ -513,12 +514,22 @@ class BluettiMqttManager:
         V2 devices select a pack by addressing the read to that node's Modbus
         slave address (from NODE_INFO) — no pack-select write is needed.
         """
-        for node in self.get_nodes(sn):
-            if not node.get("is_battery"):
-                continue
+        nodes = self.get_nodes(sn)
+        # Battery expansions, plus the main unit itself: an APEX 300 answers a
+        # pack read at its own address with its internal battery, which is a
+        # different pack from any attached expansion.
+        targets = [n["slave_addr"] for n in nodes if n.get("is_battery")]
+        main = [n["slave_addr"] for n in nodes if not n.get("is_battery")
+                and n.get("slave_addr") == 0]
+        for slave in main + targets:
             await self._poll_register(
                 sn, model, sub_sn, PACK_ITEM_INFO, PACK_ITEM_INFO_COUNT_V2,
-                slave_addr=node["slave_addr"], payload_ver=payload_ver,
+                slave_addr=slave, payload_ver=payload_ver,
+            )
+            # Cell detail (voltages, balance spread, NTC temps) for this pack.
+            await self._poll_register(
+                sn, model, sub_sn, PACK_CELL_INFO, PACK_CELL_INFO_COUNT,
+                slave_addr=slave, payload_ver=payload_ver,
             )
 
     async def _poll_register(
@@ -599,9 +610,24 @@ class BluettiMqttManager:
         if not register_data:
             return
 
-        # Determine which parser to use based on the pending request.
+        # Identify the block from the reply itself; fall back to the pending
+        # request only when the length is ambiguous. The reply's slave byte is
+        # authoritative for which pack sent it.
         pending = self._pending_request
-        if pending is not None:
+        identified = self.identify_block(len(register_data))
+        frame_slave = parsed.get("slave_addr")
+
+        if identified is not None:
+            register = identified
+            # Slave 0 is the main unit's own address, so test for presence
+            # rather than truthiness — 0 is a valid address, not a missing one.
+            if frame_slave is not None:
+                slave_addr = frame_slave
+            elif pending is not None:
+                slave_addr = pending[1]
+            else:
+                slave_addr = 1
+        elif pending is not None:
             register, slave_addr = pending
         else:
             # Unsolicited frame: the device pushes FC=03 data with no
@@ -744,6 +770,31 @@ class BluettiMqttManager:
         """Record that a device pushed telemetry unprompted."""
         self._last_push[sn] = time.monotonic()
 
+    # FC=03 replies carry no register address and can arrive after the pending
+    # request has moved on, so the block is identified from the reply's own
+    # length rather than from what was last asked for.
+    _BLOCK_BY_SIZE: dict[int, int] = {
+        HOME_DATA_COUNT * 2: HOME_DATA,               # 124
+        INV_BASE_SETTINGS_COUNT * 2: INV_BASE_SETTINGS,  # 60
+        INV_ADV_SETTINGS_COUNT * 2: INV_ADV_SETTINGS,    # 40
+        PACK_MAIN_INFO_COUNT * 2: PACK_MAIN_INFO,        # 68
+        PACK_ITEM_INFO_COUNT_V2 * 2: PACK_ITEM_INFO,     # 208
+    }
+    # The cell block's length varies with cell count, so it is matched by
+    # range — but the range must not swallow a settings block (40 or 60 bytes),
+    # which would otherwise be decoded as cells if one ever arrives unsolicited.
+    _CELL_SIZE_RANGE = (42, 58)
+
+    def identify_block(self, size: int) -> int | None:
+        """Which register block a reply of this size represents, if unambiguous."""
+        block = self._BLOCK_BY_SIZE.get(size)
+        if block is not None:
+            return block
+        low, high = self._CELL_SIZE_RANGE
+        if low <= size <= high:
+            return PACK_CELL_INFO
+        return None
+
     def _note_seen(self, sn: str) -> None:
         """Record that we heard from the device (any parsed frame)."""
         self.overlays.setdefault(sn, {})["last_seen"] = time.time()
@@ -782,6 +833,28 @@ class BluettiMqttManager:
         mqtt_overlay["mqtt_active"] = True
         self._push_mqtt_update()
 
+    def _process_pack_cells_for_node(
+        self, sn: str, register_data: bytes, slave_addr: int
+    ) -> None:
+        """Attach cell detail to the pack that reported it."""
+        cells = parse_pack_cells(register_data)
+        if not cells.get("cell_count"):
+            return
+        overlay = self.overlays.setdefault(sn, {})
+        for node in overlay.get("nodes") or []:
+            if node.get("slave_addr") != slave_addr:
+                continue
+            node["cell_count"] = cells["cell_count"]
+            if cells.get("cell_voltage_delta") is not None:
+                node["cell_voltage_delta"] = cells["cell_voltage_delta"]
+                node["cell_voltage_min"] = cells.get("cell_voltage_min")
+                node["cell_voltage_max"] = cells.get("cell_voltage_max")
+            temps = [t for t in cells.get("cell_temperatures", []) if t is not None]
+            if temps:
+                node["pack_temperature"] = max(temps)
+            break
+        self._push_mqtt_update()
+
     def _process_pack_item_v2(
         self, sn: str, register_data: bytes, slave_addr: int
     ) -> None:
@@ -808,10 +881,16 @@ class BluettiMqttManager:
                 continue
             node["pack_model"] = pack.get("pack_type")
             node["pack_serial"] = pack.get("pack_sn")
+            # A node answering a pack read has a battery worth surfacing, even
+            # if its model code isn't in the battery range — the main unit
+            # reports its own internal pack this way.
+            node["has_battery"] = True
             if pack.get("pack_soc"):
                 node["pack_soc"] = pack["pack_soc"]
             if pack.get("total_cell_count"):
                 node["cell_count"] = pack["total_cell_count"]
+            if pack.get("pack_average_temp") is not None:
+                node["pack_temperature"] = pack["pack_average_temp"]
             if pack.get("pack_voltage"):
                 node["pack_voltage"] = pack["pack_voltage"]
             break
@@ -823,11 +902,19 @@ class BluettiMqttManager:
         self, sn: str, register: int, slave_addr: int, register_data: bytes
     ) -> None:
         """Route register data to the appropriate parser based on register address."""
-        # V2 per-battery records are addressed to a node's slave address and use
-        # the V2 layout (swapped ASCII, /100 voltage) — route them separately.
-        if register == PACK_ITEM_INFO and slave_addr >= 41:
+        # V2 pack records use the V2 layout (swapped ASCII, /100 voltage).
+        # This includes the main unit's own internal pack at slave 0, so the
+        # routing must not be limited to expansion slave addresses.
+        is_v2 = (
+            self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2
+        )
+        if register == PACK_ITEM_INFO and is_v2:
             self._process_pack_item_v2(sn, register_data, slave_addr)
             return
+        if register == PACK_CELL_INFO and slave_addr:
+            self._process_pack_cells_for_node(sn, register_data, slave_addr)
+            return
+
         block_parser = _BLOCK_PARSERS.get(register)
         if block_parser is not None:
             self._process_block(sn, register, block_parser, register_data)
@@ -880,17 +967,19 @@ class BluettiMqttManager:
             if field in home_data:
                 mqtt_overlay[field] = home_data[field]
 
-        # On V2 devices the homeData ctrl bits do NOT track output state (that
-        # is why INV_BASE_SETTINGS exists), so letting them write ac/dc_switch
-        # here would clobber the authoritative value and flip the UI back.
+        # On V2 devices these ctrl bits do not track state: they read 0 for an
+        # output that is demonstrably on, and toggling ECO moved an unrelated
+        # bit rather than an eco bit. Their layout also differs from V1, so a
+        # bit read here may not even mean what its name says. Switch state
+        # comes from the settings blocks and REST instead — measured sources
+        # rather than a bitfield we cannot trust.
         is_v2 = (
             self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2
         )
-        for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
-            if is_v2 and switch_key in ("ac_switch", "dc_switch"):
-                continue
-            if ctrl_key in home_data:
-                mqtt_overlay[switch_key] = home_data[ctrl_key]
+        if not is_v2:
+            for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
+                if ctrl_key in home_data:
+                    mqtt_overlay[switch_key] = home_data[ctrl_key]
 
         # homeData carries the aggregate battery voltage/current; surface them
         # via the "Battery Total Voltage"/"Current" sensors (pack_total_*). For

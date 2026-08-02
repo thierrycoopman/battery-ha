@@ -291,6 +291,17 @@ def test_parse_mqtt_payload_fc10_pack_main_info():
 
 # -- HomeData register map --
 
+def _pack_s32_ws(data, offset, value):
+    """Signed 32-bit, stored low register first."""
+    _pack_u32_ws(data, offset, value & 0xFFFFFFFF)
+
+
+def _pack_u32_ws(data, offset, value):
+    """Write a 32-bit value the way the device stores it: low register first."""
+    hi, lo = (value >> 16) & 0xFFFF, value & 0xFFFF
+    struct.pack_into(">HH", data, offset, lo, hi)
+
+
 def _build_home_data(
     voltage=0, current=0, soc=0, charging=0,
     charge_time=0, discharge_time=0, ctrl=0,
@@ -379,13 +390,13 @@ def test_parse_home_data_extended_fields():
     struct.pack_into(">H", data, 0, 532)
     struct.pack_into(">H", data, 4, 72)
     # Extended power fields at byte 80+
-    struct.pack_into(">I", data, 80, 1500)  # total_dc_power
-    struct.pack_into(">I", data, 84, 1200)  # total_ac_power
-    struct.pack_into(">I", data, 88, 2000)  # total_pv_power
-    struct.pack_into(">i", data, 92, -500)  # total_grid_power (signed)
+    _pack_u32_ws(data, 80, 1500)  # total_dc_power
+    _pack_u32_ws(data, 84, 1200)  # total_ac_power
+    _pack_u32_ws(data, 88, 2000)  # total_pv_power
+    _pack_s32_ws(data, 92, -500)  # total_grid_power (signed)
     # Energy fields at 100+
-    struct.pack_into(">I", data, 100, 35)   # total_dc_energy = 3.5
-    struct.pack_into(">I", data, 104, 452)  # total_ac_energy = 45.2
+    _pack_u32_ws(data, 100, 35)   # total_dc_energy = 3.5
+    _pack_u32_ws(data, 104, 452)  # total_ac_energy = 45.2
 
     hd = parse_home_data(bytes(data))
 

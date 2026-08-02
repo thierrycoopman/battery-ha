@@ -137,6 +137,12 @@ def u32_word_swapped(data: bytes) -> int:
     )
 
 
+def _s32_word_swapped(data: bytes) -> int:
+    """Signed 32-bit value stored low-register-first."""
+    value = u32_word_swapped(data)
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
 def crc16_modbus(data: bytes) -> bytes:
     """Calculate Modbus CRC16 checksum.
 
@@ -498,7 +504,7 @@ def parse_node_info(register_data: bytes) -> list[dict[str, Any]]:
             "upgrading": bool(status & 0x02),
             "warning": bool(status & 0x04),
             "error": bool(status & 0x08),
-            "sn": r[6:14].hex(),
+            "sn": device_sn_from_registers(r[6:14]),
         })
     return nodes
 
@@ -794,10 +800,10 @@ def parse_home_data(data: bytes) -> dict[str, Any]:
         result["pack_online_mask"] = _u16(data, 16)
 
     if len(data) > 31:
-        result["device_model"] = _ascii(data, 20, 12)
+        result["device_model"] = ascii_swapped(data[20:32])
 
     if len(data) > 39:
-        result["device_sn"] = _ascii(data, 32, 8)
+        result["device_sn"] = device_sn_from_registers(data[32:40])
 
     if len(data) > 41:
         result["inverter_count"] = data[41]
@@ -816,18 +822,19 @@ def parse_home_data(data: bytes) -> dict[str, Any]:
 
     # Extended fields (protocolVer >= 2001, byte indices 80+)
     if len(data) > 99:
-        result["total_dc_power"] = _u32(data, 80)
-        result["total_ac_power"] = _u32(data, 84)
-        result["total_pv_power"] = _u32(data, 88)
-        result["total_grid_power"] = _s32(data, 92)
-        result["total_inv_power"] = _u32(data, 96)
+        # 32-bit values store the low register first, as everywhere else.
+        result["total_dc_power"] = u32_word_swapped(data[80:84])
+        result["total_ac_power"] = u32_word_swapped(data[84:88])
+        result["total_pv_power"] = u32_word_swapped(data[88:92])
+        result["total_grid_power"] = _s32_word_swapped(data[92:96])
+        result["total_inv_power"] = u32_word_swapped(data[96:100])
 
     if len(data) > 119:
-        result["total_dc_energy"] = _u32(data, 100) / 10.0
-        result["total_ac_energy"] = _u32(data, 104) / 10.0
-        result["total_pv_energy"] = _u32(data, 108) / 10.0
-        result["total_grid_energy"] = _u32(data, 112) / 10.0
-        result["total_feedback_energy"] = _u32(data, 116) / 10.0
+        result["total_dc_energy"] = u32_word_swapped(data[100:104]) / 10.0
+        result["total_ac_energy"] = u32_word_swapped(data[104:108]) / 10.0
+        result["total_pv_energy"] = u32_word_swapped(data[108:112]) / 10.0
+        result["total_grid_energy"] = u32_word_swapped(data[112:116]) / 10.0
+        result["total_feedback_energy"] = u32_word_swapped(data[116:120]) / 10.0
 
     if len(data) > 121:
         result["charging_mode"] = data[121]
@@ -893,6 +900,7 @@ INV_GRID_INFO = 1300     # grid frequency / per-phase / import-export energy
 INV_LOAD_INFO = 1400     # AC + DC load breakdown
 INV_INV_INFO = 1500      # inverter output
 PACK_CELL_INFO = 6300    # per-cell voltages + NTC temperatures
+PACK_CELL_INFO_COUNT = 25  # 50 bytes
 
 
 def _temp_or_none(raw: int) -> int | None:
@@ -966,14 +974,16 @@ def parse_inv_grid_info(data: bytes) -> dict[str, Any]:
             break
         phases.append({
             "index": i + 1,
-            "power": _u16(data, off),
+            "power": abs(_s16(data, off)),
             "voltage": _u16(data, off + 2) / 10.0,
-            "current": _u16(data, off + 4) / 10.0,
-            "apparent_power": _u16(data, off + 6),
+            "current": abs(_s16(data, off + 4)) / 10.0,
+            "apparent_power": abs(_s16(data, off + 6)),
         })
     return {
         "grid_frequency": _u16(data, 0) / 10.0,
-        "grid_power": u32_word_swapped(data[2:6]),
+        # The app reports magnitude; an unsigned read turns a small export
+        # into billions of watts.
+        "grid_power": abs(_s32_word_swapped(data[2:6])),
         "grid_import_energy": u32_word_swapped(data[6:10]) / 10.0,
         "grid_export_energy": int.from_bytes(data[10:14], "big") / 10.0,
         "grid_phases": phase_count,
@@ -1128,7 +1138,10 @@ def parse_pack_item_info_v2(data: bytes) -> dict[str, Any]:
     divisor and the -40 (not -41) temperature offset.
     """
     result: dict[str, Any] = {}
-    if len(data) < 32:
+    # A real V2 pack record is 208 bytes. Anything much shorter is a different
+    # block that reached here by mistake; decoding it would yield plausible-
+    # looking nonsense (a cell block once decoded as SOC 252 at 33.24 V).
+    if len(data) < 100:
         return result
 
     result["pack_id"] = data[1]

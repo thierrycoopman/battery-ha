@@ -73,3 +73,66 @@ class BluettiCloudEntity(CoordinatorEntity[BluettiCloudCoordinator]):
         if device_data is None:
             return False
         return is_device_reachable(device_data)
+
+
+class BluettiSubDeviceEntity(CoordinatorEntity[BluettiCloudCoordinator]):
+    """Base for entities belonging to an expansion connected to a main unit.
+
+    Each expansion — a battery such as a B300 or B300K, or a hub such as the
+    D1 (DC) or A1 (AC) — is registered as its own Home Assistant device, linked
+    to the main unit via `via_device`. That keeps a growing setup navigable and
+    lets a dashboard target one expansion directly, instead of every entity
+    piling into a single flat list on the parent.
+
+    The Modbus slave address is the stable identity: two batteries of the same
+    model never collide, and an expansion keeps its entities across restarts.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: BluettiCloudCoordinator,
+        parent_sn: str,
+        slave_addr: int,
+        key: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._device_sn = parent_sn
+        self._slave_addr = slave_addr
+        self._attr_unique_id = f"{parent_sn}_node_{slave_addr}_{key}"
+
+        node = self.node
+        name = node.get("model_name") or f"Expansion {slave_addr}"
+        # The main unit's own node carries its internal battery; name it for
+        # what it is rather than repeating the parent's model.
+        if slave_addr == 0 and node.get("has_battery"):
+            name = "Internal Battery"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{parent_sn}_node_{slave_addr}")},
+            via_device=(DOMAIN, parent_sn),
+            name=name,
+            manufacturer="Bluetti",
+            model=name,
+            serial_number=node.get("sn") or None,
+        )
+
+    @property
+    def parent_data(self) -> dict[str, Any]:
+        """Coordinator data for the main unit this expansion is attached to."""
+        if self.coordinator.data is None:
+            return {}
+        return self.coordinator.data.get(self._device_sn, {})
+
+    @property
+    def node(self) -> dict[str, Any]:
+        """The node record for this expansion, or {} if it is not reported."""
+        for node in self.parent_data.get("nodes", []):
+            if node.get("slave_addr") == self._slave_addr:
+                return node
+        return {}
+
+    @property
+    def available(self) -> bool:
+        """Available while the main unit still reports this expansion."""
+        return bool(self.node)
