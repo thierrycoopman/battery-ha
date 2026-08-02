@@ -65,7 +65,8 @@ This integration talks to the same private cloud API and MQTT broker as the Blue
 - **Two device protocols** — V1 devices (AC300) push data unprompted (FC=16); V2 / 2nd-gen IoT devices (APEX 300, `protocolVer` ≥ 2000) are actively polled using a different payload envelope
 - **Sub-device discovery** — On V2 devices, batteries and additions (D1 hub, A1 hub, SolarX) are enumerated and tracked individually, with batteries identified by model (B300 / B300K / B500K, …)
 - **Per-battery sensors** — Individual state of charge per battery
-- **AC/DC control** — Switch entities on devices that support control (AC300); devices without control expose read-only output-state sensors instead
+- **AC/DC control** — Switch entities on devices that support control; devices without it expose read-only output-state sensors instead
+- **Device settings** — ECO idle-shutoff, charging mode, grid charging and feed-in, with power and SOC limits. Every value is bounded by what the device itself accepts
 - **Power monitoring** — PV input, grid input, AC output, DC output, grid feed-in (W)
 - **Energy tracking** — Daily, monthly, yearly, and lifetime totals (kWh) for the HA Energy Dashboard
 - **Automatic MQTT reconnection** — Exponential backoff (30s → 60s → 120s → 5min) with fresh credentials each attempt
@@ -109,6 +110,26 @@ MQTT data takes precedence where it is available (it is more current). REST supp
 | Energy This Year | Energy generated this year | kWh | REST |
 | Lifetime Energy | Total lifetime energy | kWh | REST |
 
+### V2 Telemetry Sensors
+
+Devices on the 2nd-generation protocol (APEX 300) broadcast additional register
+blocks, which become these sensors:
+
+| Entity | Description | Unit |
+|--------|-------------|------|
+| Ambient / Inverter / PV Converter Temperature | Internal temperatures | °C |
+| Grid Frequency | Mains frequency | Hz |
+| Grid Import Energy / Grid Export Energy | Cumulative grid exchange | kWh |
+| PV Total Energy | Cumulative solar generation | kWh |
+| AC Load Power / DC Load Power | Load split by output type | W |
+| Inverter Frequency | Inverter output frequency | Hz |
+| Cell Voltage Delta | Spread between highest and lowest cell — a pack-health signal | V |
+| Cell Voltage Min / Max | Per-cell extremes (disabled by default) | V |
+
+> Temperatures and per-battery electricals are only populated by the hardware
+> when it has something to report. Fields the device leaves empty are omitted
+> rather than shown as `0` or `-40 °C`.
+
 ### Per-Battery Sensors (dynamic)
 
 Created automatically as batteries are discovered. How they appear depends on the device protocol:
@@ -151,8 +172,32 @@ Created for devices the integration can control — currently the AC300 (V1 regi
 
 | Entity | Description |
 |--------|-------------|
-| AC Output | Toggle AC output on/off (via MQTT) |
-| DC Output | Toggle DC output on/off (via MQTT) |
+| AC Output | Toggle AC output on/off |
+| DC Output | Toggle DC output on/off |
+| AC ECO Mode / DC ECO Mode | Turn the output off automatically when idle (V2 devices) |
+| Grid Charging | Allow charging from the grid (V2 devices) |
+| Grid Feed-in | Allow exporting to the grid (V2 devices) |
+
+### Select
+
+| Entity | Options |
+|--------|---------|
+| Charging Mode | `standard`, `silent`, `turbo`, `custom` |
+
+### Numbers
+
+Bounds come from the device's own accepted ranges, so the UI cannot offer a
+value the device would reject.
+
+| Entity | Range |
+|--------|-------|
+| AC / DC ECO Auto-Off | 1–4 hours |
+| AC ECO Power Threshold | 10–40 W |
+| DC ECO Power Threshold | 5–20 W |
+
+> **ECO mode** switches an output off once it has drawn less than the power
+> threshold for the auto-off duration — useful for stopping a mostly-idle
+> inverter from draining the battery overnight.
 
 ## Installation
 
@@ -197,6 +242,24 @@ remove the integration: go to **Settings → Devices & Services → Bluetti Clou
 ⋮ → Reconfigure** and tick the new device. Existing entities and history are
 preserved.
 
+## A Note on Device Writes
+
+This integration writes to your device over Bluetti's own protocol. Writes are
+restricted to an **allowlist** of registers known to be safe and reversible —
+output switches, ECO mode, charging mode, grid charging and feed-in — with
+values validated against the ranges the device accepts.
+
+That restriction is deliberate. Neighbouring registers in the same address
+space are destructive: one disables anti-islanding protection (which exists to
+stop an inverter energising a grid that line workers believe is dead), others
+trigger a factory reset, irreversibly clear lifetime energy counters, start a
+battery calibration cycle, or arm a firmware update. None of those are exposed,
+and the guard refuses them by address range — not by name, because some of the
+dangerous addresses are undocumented.
+
+If you extend this integration, keep that allowlist approach. A wrong register
+here does not throw an exception; it changes real hardware.
+
 ## Troubleshooting
 
 ### MQTT sensors show "Unknown"
@@ -211,6 +274,16 @@ These are created dynamically as the integration discovers them.
 
 ### Switches not responding
 Switch control requires MQTT. If MQTT is disconnected, switches won't work. The integration keeps retrying in the background — they start working again once MQTT reconnects.
+
+### ECO / charging mode / grid switches show "Unknown"
+These read their state from device settings blocks that are only polled once
+MQTT is connected. Give it a poll cycle after startup. If they stay unknown,
+MQTT is not connected — see the first entry above.
+
+### Changing a setting doesn't seem to stick
+The entity updates optimistically, then confirms from the device's next state
+push (usually within ~10s). If it reverts, the device rejected the value —
+check the logs for the register and value that were sent.
 
 ### A device I just added to my Bluetti account isn't there
 The device list is stored in the config entry, so a restart alone won't pick it up. Use **⋮ → Reconfigure** (see [Adding a device later](#adding-a-device-later)).
@@ -245,7 +318,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (168 tests) and lint
+# Run tests (235 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```
