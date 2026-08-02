@@ -513,12 +513,17 @@ class BluettiMqttManager:
         V2 devices select a pack by addressing the read to that node's Modbus
         slave address (from NODE_INFO) — no pack-select write is needed.
         """
-        for node in self.get_nodes(sn):
-            if not node.get("is_battery"):
-                continue
+        nodes = self.get_nodes(sn)
+        # Battery expansions, plus the main unit itself: an APEX 300 answers a
+        # pack read at its own address with its internal battery, which is a
+        # different pack from any attached expansion.
+        targets = [n["slave_addr"] for n in nodes if n.get("is_battery")]
+        main = [n["slave_addr"] for n in nodes if not n.get("is_battery")
+                and n.get("slave_addr") == 0]
+        for slave in main + targets:
             await self._poll_register(
                 sn, model, sub_sn, PACK_ITEM_INFO, PACK_ITEM_INFO_COUNT_V2,
-                slave_addr=node["slave_addr"], payload_ver=payload_ver,
+                slave_addr=slave, payload_ver=payload_ver,
             )
 
     async def _poll_register(
@@ -808,6 +813,10 @@ class BluettiMqttManager:
                 continue
             node["pack_model"] = pack.get("pack_type")
             node["pack_serial"] = pack.get("pack_sn")
+            # A node answering a pack read has a battery worth surfacing, even
+            # if its model code isn't in the battery range — the main unit
+            # reports its own internal pack this way.
+            node["has_battery"] = True
             if pack.get("pack_soc"):
                 node["pack_soc"] = pack["pack_soc"]
             if pack.get("total_cell_count"):

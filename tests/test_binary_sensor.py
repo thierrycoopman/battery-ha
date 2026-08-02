@@ -65,10 +65,6 @@ async def test_mqtt_device_gets_no_output_state_sensors():
 async def test_node_binary_sensors_created_from_node_list():
     """Sub-device nodes become connectivity binary sensors."""
     from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE
-    from custom_components.bluetti_cloud.binary_sensor import (
-        BluettiCloudNodeBinarySensor,
-    )
-
     nodes = [
         {"slave_addr": 0, "model": 6, "model_name": "AP300", "is_battery": False,
          "online": True, "warning": False, "error": False, "sn": "aa"},
@@ -91,10 +87,19 @@ async def test_node_binary_sensors_created_from_node_list():
     with patch("homeassistant.helpers.frame.report_usage"):
         await async_setup_entry(MagicMock(), entry, added.extend)
 
-    node_sensors = [e for e in added if isinstance(e, BluettiCloudNodeBinarySensor)]
-    assert len(node_sensors) == 3
-    battery = next(e for e in node_sensors if e._slave_addr == 51)
+    from custom_components.bluetti_cloud.entity import BluettiSubDeviceEntity
+
+    sub = [e for e in added if isinstance(e, BluettiSubDeviceEntity)]
+    # Each of the 3 nodes gets a connectivity and a fault sensor.
+    assert len(sub) == 6
+    battery = next(
+        e for e in sub if e._slave_addr == 51 and e.unique_id.endswith("online")
+    )
     assert battery.is_on is True
-    assert battery.extra_state_attributes["is_battery"] is True
-    hub = next(e for e in node_sensors if e._slave_addr == 11)
+    assert battery.extra_state_attributes["type"] == "battery"
+    hub = next(
+        e for e in sub if e._slave_addr == 11 and e.unique_id.endswith("online")
+    )
     assert hub.extra_state_attributes["model"] == "D1 Hub (HD1)"
+    # Each sub-device is registered as its own device under the parent.
+    assert hub.device_info["via_device"] == ("bluetti_cloud", "SN")

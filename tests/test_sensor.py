@@ -238,10 +238,7 @@ async def test_rest_only_summary_sensor_is_voltage_only():
 async def test_per_battery_node_soc_sensor():
     """Battery sub-device nodes get their own SOC sensor."""
     from custom_components.bluetti_cloud.api.profiles import AP300_PROFILE
-    from custom_components.bluetti_cloud.sensor import (
-        BluettiCloudNodeBatterySensor,
-        async_setup_entry,
-    )
+    from custom_components.bluetti_cloud.sensor import async_setup_entry
 
     nodes = [
         {"slave_addr": 11, "model": 3007, "model_name": "D1 Hub (HD1)",
@@ -264,12 +261,16 @@ async def test_per_battery_node_soc_sensor():
     with patch("homeassistant.helpers.frame.report_usage"):
         await async_setup_entry(MagicMock(), entry, added.extend)
 
-    node_sensors = [e for e in added if isinstance(e, BluettiCloudNodeBatterySensor)]
-    # Only the battery node gets a SOC sensor, not the hub
-    assert len(node_sensors) == 1
-    assert node_sensors[0]._slave_addr == 51
-    assert node_sensors[0].native_value == 95
-    assert "B300" in node_sensors[0].name
+    from custom_components.bluetti_cloud.subdevice import BluettiSubDeviceSensor
+
+    node_sensors = [e for e in added if isinstance(e, BluettiSubDeviceSensor)]
+    # Only the battery node gets battery sensors, not the hub.
+    assert {e._slave_addr for e in node_sensors} == {51}
+    soc = next(e for e in node_sensors if e.unique_id.endswith("_soc"))
+    assert soc.native_value == 95
+    # Named by function; HA prefixes the device name (B300).
+    assert soc.name == "Battery"
+    assert soc.device_info["name"] == "B300"
 
 
 @pytest.mark.asyncio

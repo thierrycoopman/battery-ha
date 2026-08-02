@@ -25,6 +25,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import BluettiCloudCoordinator, BluettiConfigEntry
 from .entity import BluettiCloudEntity
+from .subdevice import build_sub_device_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -360,16 +361,22 @@ async def async_setup_entry(
     def _on_nodes(sn: str, nodes: list[dict]) -> None:
         if sn not in created_nodes:
             return
-        new_entities: list[BluettiCloudNodeBatterySensor] = []
+        new_entities: list = []
         for node in nodes:
-            if not node.get("is_battery"):
+            if not (node.get("is_battery") or node.get("has_battery")):
                 continue
             addr = node["slave_addr"]
             if addr in created_nodes[sn]:
                 continue
             created_nodes[sn].add(addr)
-            _LOGGER.info("Creating SOC sensor for %s battery node %d", sn, addr)
-            new_entities.append(BluettiCloudNodeBatterySensor(coordinator, sn, addr))
+            _LOGGER.info(
+                "Creating entities for %s expansion at node %d (%s)",
+                sn, addr, node.get("model_name"),
+            )
+            new_entities.extend(
+                e for e in build_sub_device_entities(coordinator, sn, node)
+                if isinstance(e, SensorEntity)
+            )
         if new_entities:
             async_add_entities(new_entities)
 
@@ -395,32 +402,3 @@ class BluettiCloudSensor(BluettiCloudEntity, SensorEntity):
     @property
     def native_value(self) -> int | float | str | None:
         return self.device_data.get(self.entity_description.data_key)
-
-
-class BluettiCloudNodeBatterySensor(BluettiCloudEntity, SensorEntity):
-    """State of charge for an individual battery sub-device (node)."""
-
-    _attr_device_class = SensorDeviceClass.BATTERY
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = PERCENTAGE
-
-    def __init__(
-        self,
-        coordinator: BluettiCloudCoordinator,
-        device_sn: str,
-        slave_addr: int,
-    ) -> None:
-        super().__init__(coordinator, device_sn, f"node_{slave_addr}_soc")
-        self._slave_addr = slave_addr
-        model = self._node().get("model_name", "Battery")
-        self._attr_name = f"{model} (node {slave_addr}) Battery"
-
-    def _node(self) -> dict:
-        for node in self.device_data.get("nodes", []):
-            if node.get("slave_addr") == self._slave_addr:
-                return node
-        return {}
-
-    @property
-    def native_value(self) -> int | None:
-        return self._node().get("pack_soc")

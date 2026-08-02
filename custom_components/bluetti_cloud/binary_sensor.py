@@ -20,6 +20,7 @@ from .coordinator import (
     is_device_reachable,
 )
 from .entity import BluettiCloudEntity
+from .subdevice import build_sub_device_entities
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -126,13 +127,16 @@ async def async_setup_entry(
     def _add_nodes(sn: str, nodes: list[dict]) -> None:
         if sn not in created_nodes:
             return
-        new_entities: list[BluettiCloudNodeBinarySensor] = []
+        new_entities: list = []
         for node in nodes:
             addr = node["slave_addr"]
             if addr in created_nodes[sn]:
                 continue
             created_nodes[sn].add(addr)
-            new_entities.append(BluettiCloudNodeBinarySensor(coordinator, sn, addr))
+            new_entities.extend(
+                e for e in build_sub_device_entities(coordinator, sn, node)
+                if isinstance(e, BinarySensorEntity)
+            )
         if new_entities:
             async_add_entities(new_entities)
 
@@ -164,52 +168,6 @@ class BluettiCloudBinarySensor(BluettiCloudEntity, BinarySensorEntity):
         if isinstance(expected, bool):
             return bool(value)
         return value == expected
-
-
-class BluettiCloudNodeBinarySensor(BluettiCloudEntity, BinarySensorEntity):
-    """Connectivity sensor for a discovered sub-device (battery, hub, inverter)."""
-
-    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-
-    def __init__(
-        self,
-        coordinator: BluettiCloudCoordinator,
-        device_sn: str,
-        slave_addr: int,
-    ) -> None:
-        super().__init__(coordinator, device_sn, f"node_{slave_addr}")
-        self._slave_addr = slave_addr
-        self._attr_name = f"{self._node().get('model_name', 'Sub-device')} (node {slave_addr})"
-
-    def _node(self) -> dict:
-        for node in self.device_data.get("nodes", []):
-            if node.get("slave_addr") == self._slave_addr:
-                return node
-        return {}
-
-    @property
-    def is_on(self) -> bool | None:
-        node = self._node()
-        return node.get("online") if node else None
-
-    @property
-    def extra_state_attributes(self) -> dict[str, object]:
-        node = self._node()
-        attrs: dict[str, object] = {
-            "model": node.get("model_name"),
-            "model_code": node.get("model"),
-            "slave_address": self._slave_addr,
-            "is_battery": node.get("is_battery"),
-            "warning": node.get("warning"),
-            "error": node.get("error"),
-            "serial": node.get("sn"),
-        }
-        # Per-battery detail, when the node reported its own pack record.
-        for key in ("pack_model", "pack_serial", "pack_soc", "cell_count",
-                    "pack_voltage"):
-            if key in node:
-                attrs[key] = node[key]
-        return attrs
 
 
 class BluettiReachableBinarySensor(BluettiCloudBinarySensor):
