@@ -18,30 +18,50 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .api.modbus import (
     AC_SWITCH,
+    AC_SWITCH_V2,
     DC_SWITCH,
+    DC_SWITCH_V2,
     EXCEPTION_ILLEGAL_DATA_ADDRESS,
     FUNC_READ_HOLDING,
     FUNC_WRITE_MULTIPLE,
     FUNC_WRITE_SINGLE,
     HOME_DATA,
     HOME_DATA_COUNT,
+    INV_ADV_SETTINGS,
+    INV_ADV_SETTINGS_COUNT,
+    INV_BASE_INFO,
+    INV_BASE_SETTINGS,
+    INV_BASE_SETTINGS_COUNT,
+    INV_GRID_INFO,
+    INV_INV_INFO,
+    INV_LOAD_INFO,
+    INV_PV_INFO,
     IOT_PAYLOAD_VER_V2,
     NODE_INFO,
+    PACK_CELL_INFO,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT,
     PACK_ITEM_INFO_COUNT_V2,
     PACK_MAIN_INFO,
     PACK_MAIN_INFO_COUNT,
-    PACK_SELECT,
     parse_fc16_registers,
     parse_home_data,
+    parse_inv_adv_settings,
+    parse_inv_base_info,
+    parse_inv_base_settings,
+    parse_inv_grid_info,
+    parse_inv_inv_info,
+    parse_inv_load_info,
+    parse_inv_pv_info,
     parse_node_info,
+    parse_pack_cells,
     parse_pack_item_info,
     parse_pack_item_info_v2,
     parse_pack_main_info,
@@ -54,6 +74,7 @@ from .const import (
     MQTT_RECONNECT_MIN,
     MQTT_REQUEST_TIMEOUT,
     MQTT_SCAN_INTERVAL,
+    PUSH_ACTIVE_WINDOW,
 )
 
 if TYPE_CHECKING:
@@ -79,9 +100,29 @@ _MQTT_SWITCH_MAP = {
 }
 
 # Register address to switch data key (for FC=06 write echo)
+# Unsolicited FC=03 frames carry no start_addr. Only lengths that uniquely
+# identify a block are accepted; anything else is ignored rather than guessed.
+_UNSOLICITED_BY_LENGTH = {
+    HOME_DATA_COUNT * 2: HOME_DATA,
+    INV_BASE_SETTINGS_COUNT * 2: INV_BASE_SETTINGS,
+}
+
+# Telemetry blocks the device pushes, and the parser for each.
+_BLOCK_PARSERS = {
+    INV_ADV_SETTINGS: parse_inv_adv_settings,
+    INV_BASE_INFO: parse_inv_base_info,
+    INV_PV_INFO: parse_inv_pv_info,
+    INV_GRID_INFO: parse_inv_grid_info,
+    INV_LOAD_INFO: parse_inv_load_info,
+    INV_INV_INFO: parse_inv_inv_info,
+    PACK_CELL_INFO: parse_pack_cells,
+}
+
 _REGISTER_TO_SWITCH = {
     AC_SWITCH: "ac_switch",
     DC_SWITCH: "dc_switch",
+    AC_SWITCH_V2: "ac_switch",
+    DC_SWITCH_V2: "dc_switch",
 }
 
 
@@ -124,6 +165,9 @@ class BluettiMqttManager:
         self._fc16_devices: set[str] = set()
         # Callbacks for new pack discovery
         self._new_pack_callbacks: list[Callable[[str, int], None]] = []
+        # Last time a V2 device pushed telemetry (monotonic seconds), used to
+        # skip redundant polling while the device is streaming on its own.
+        self._last_push: dict[str, float] = {}
         # Sub-device (NODE_INFO) discovery: seen node slave addrs + callbacks
         self._discovered_nodes: dict[str, set[int]] = {}
         self._node_callbacks: list[Callable[[str, list[dict[str, Any]]], None]] = []
@@ -365,12 +409,35 @@ class BluettiMqttManager:
 
                     profile = self._coordinator.profile_for(sn)
                     if profile.iot_payload_ver >= IOT_PAYLOAD_VER_V2:
+                        # The device streams telemetry on its own; polling on
+                        # top of that is redundant traffic. Still poll while it
+                        # is quiet, so data never goes stale if the stream stops.
+                        if self.is_streaming(sn):
+                            _LOGGER.debug(
+                                "Skipping poll for %s — device is streaming", sn
+                            )
+                            continue
                         # 2nd-gen IoT poll device (AP300): homeData (reg 100)
                         # provides aggregate SOC/voltage/charging/switch state.
                         # Per-pack blocks (PackMainInfo/PackItemInfo) are a
                         # follow-up (#5). Uses slave 0 + the V2 payload envelope.
                         await self._poll_register(
                             sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT,
+                            slave_addr=profile.slave_addr,
+                            payload_ver=profile.iot_payload_ver,
+                        )
+                        # Authoritative AC/DC switch state (the V2 homeData
+                        # ctrl bits do not track it reliably).
+                        await self._poll_register(
+                            sn, model, sub_sn, INV_BASE_SETTINGS,
+                            INV_BASE_SETTINGS_COUNT,
+                            slave_addr=profile.slave_addr,
+                            payload_ver=profile.iot_payload_ver,
+                        )
+                        # Grid charging / feed-in state.
+                        await self._poll_register(
+                            sn, model, sub_sn, INV_ADV_SETTINGS,
+                            INV_ADV_SETTINGS_COUNT,
                             slave_addr=profile.slave_addr,
                             payload_ver=profile.iot_payload_ver,
                         )
@@ -521,14 +588,25 @@ class BluettiMqttManager:
         if not register_data:
             return
 
-        # Determine which parser to use based on pending request
+        # Determine which parser to use based on the pending request.
         pending = self._pending_request
         if pending is not None:
             register, slave_addr = pending
         else:
-            # No pending request — assume homeData (passive response / unsolicited)
-            register = HOME_DATA
+            # Unsolicited frame: the device pushes FC=03 data with no
+            # start_addr, so the only clue is the payload length. Guessing
+            # homeData here would decode e.g. a 208-byte pack frame with the
+            # 124-byte homeData layout and emit garbage, so anything that
+            # isn't an exact length match is left alone.
+            register = _UNSOLICITED_BY_LENGTH.get(len(register_data))
             slave_addr = 1
+            if register is None:
+                _LOGGER.debug(
+                    "Ignoring unsolicited FC=03 frame for %s: %d bytes, "
+                    "no pending request to identify it",
+                    sn, len(register_data),
+                )
+                return
 
         self._route_register_data(sn, register, slave_addr, register_data)
 
@@ -572,16 +650,22 @@ class BluettiMqttManager:
             sn, start_addr, len(register_data),
         )
 
-        # Parse using AC300 register map (actual register addresses)
-        self._process_fc16_data(sn, start_addr, register_data)
-
-        # Also route to V2 parsers if start_addr matches V2 register addresses
         slave_addr = 1
         pending = self._pending_request
         if pending is not None:
             slave_addr = pending[1]
 
-        self._route_register_data(sn, start_addr, slave_addr, register_data)
+        # V2 devices stream telemetry as FC=16 pushes using V2 register
+        # addresses. They must NOT go through the V1 (AC300) register map:
+        # besides producing nonsense, it would flag the device as a V1 pusher
+        # and disable its polling.
+        if self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2:
+            self._note_push(sn)
+            self._route_register_data(sn, start_addr, slave_addr, register_data)
+        else:
+            # V1: AC300 register map (raw addresses 0, 36, 70, 130, 3000)
+            self._process_fc16_data(sn, start_addr, register_data)
+            self._route_register_data(sn, start_addr, slave_addr, register_data)
 
         # Only signal response event if this matches the pending request
         if pending is not None and start_addr == pending[0]:
@@ -645,6 +729,44 @@ class BluettiMqttManager:
 
         self._push_mqtt_update()
 
+    def _note_push(self, sn: str) -> None:
+        """Record that a device pushed telemetry unprompted."""
+        self._last_push[sn] = time.monotonic()
+
+    def is_streaming(self, sn: str) -> bool:
+        """True if the device pushed telemetry recently enough to skip polling."""
+        last = self._last_push.get(sn)
+        return last is not None and (time.monotonic() - last) < PUSH_ACTIVE_WINDOW
+
+    def _process_block(self, sn: str, register: int, parser, data: bytes) -> None:
+        """Parse a telemetry block and merge its fields into the overlay."""
+        fields = parser(data)
+        if not fields:
+            return
+        _LOGGER.debug("MQTT block %d for %s: %d fields", register, sn, len(fields))
+        overlay = self.overlays.setdefault(sn, {})
+        overlay.update(fields)
+        overlay["mqtt_active"] = True
+        self._push_mqtt_update()
+
+    def _process_inv_base_settings(self, sn: str, register_data: bytes) -> None:
+        """Store the authoritative AC/DC switch state from reg 2000."""
+        settings = parse_inv_base_settings(register_data)
+        if not settings:
+            return
+        _LOGGER.debug(
+            "MQTT inv base settings for %s: ac=%s dc=%s",
+            sn, settings["ctrl_ac_switch"], settings["ctrl_dc_switch"],
+        )
+        mqtt_overlay = self.overlays.setdefault(sn, {})
+        # Carry every parsed field through (ECO state lives in this block too),
+        # then alias the switch states to the keys the entities read.
+        mqtt_overlay.update(settings)
+        mqtt_overlay["ac_switch"] = settings["ctrl_ac_switch"]
+        mqtt_overlay["dc_switch"] = settings["ctrl_dc_switch"]
+        mqtt_overlay["mqtt_active"] = True
+        self._push_mqtt_update()
+
     def _process_pack_item_v2(
         self, sn: str, register_data: bytes, slave_addr: int
     ) -> None:
@@ -691,7 +813,12 @@ class BluettiMqttManager:
         if register == PACK_ITEM_INFO and slave_addr >= 41:
             self._process_pack_item_v2(sn, register_data, slave_addr)
             return
-        if register == HOME_DATA:
+        block_parser = _BLOCK_PARSERS.get(register)
+        if block_parser is not None:
+            self._process_block(sn, register, block_parser, register_data)
+        elif register == INV_BASE_SETTINGS:
+            self._process_inv_base_settings(sn, register_data)
+        elif register == HOME_DATA:
             self._process_home_data(sn, register_data)
         elif register == PACK_MAIN_INFO:
             self._process_pack_main_info(sn, register_data)
@@ -738,7 +865,15 @@ class BluettiMqttManager:
             if field in home_data:
                 mqtt_overlay[field] = home_data[field]
 
+        # On V2 devices the homeData ctrl bits do NOT track output state (that
+        # is why INV_BASE_SETTINGS exists), so letting them write ac/dc_switch
+        # here would clobber the authoritative value and flip the UI back.
+        is_v2 = (
+            self._coordinator.profile_for(sn).iot_payload_ver >= IOT_PAYLOAD_VER_V2
+        )
         for ctrl_key, switch_key in _MQTT_SWITCH_MAP.items():
+            if is_v2 and switch_key in ("ac_switch", "dc_switch"):
+                continue
             if ctrl_key in home_data:
                 mqtt_overlay[switch_key] = home_data[ctrl_key]
 
@@ -960,10 +1095,12 @@ class BluettiMqttManager:
         if not model or not sub_sn:
             return
         try:
-            self._mqtt_client.send_command(model, sub_sn, PACK_SELECT, pack_num)
+            self._mqtt_client.send_pack_select(model, sub_sn, pack_num)
             _LOGGER.debug("Pack select: %s → pack %d", sn, pack_num)
-        except BluettiMqttError:
-            _LOGGER.debug("Failed to send pack select for %s", sn)
+        except (BluettiMqttError, ValueError):
+            # A rejected pack-select must not abort the telemetry push that
+            # triggered it.
+            _LOGGER.debug("Failed to send pack select for %s", sn, exc_info=True)
 
     def _handle_write_echo(self, sn: str, parsed: dict) -> None:
         """Process FC=06 write echo (switch command confirmation)."""

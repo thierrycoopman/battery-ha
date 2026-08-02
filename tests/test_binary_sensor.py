@@ -4,12 +4,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE, AP300_PROFILE
+from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE, DeviceProfile
 from custom_components.bluetti_cloud.binary_sensor import (
     BINARY_SENSOR_DESCRIPTIONS,
     OUTPUT_STATE_DESCRIPTIONS,
     async_setup_entry,
 )
+
+_UNCONTROLLABLE = DeviceProfile(model="RO", protocol_ver_min=0, data_path="rest_only")
 
 
 def _coordinator():
@@ -17,18 +19,18 @@ def _coordinator():
     coordinator.data = {}
     coordinator._device_info = {}
     coordinator.profile_for.side_effect = (
-        lambda sn: AC300_PROFILE if "AC300" in sn else AP300_PROFILE
+        lambda sn: AC300_PROFILE if "AC300" in sn else _UNCONTROLLABLE
     )
     return coordinator
 
 
 @pytest.mark.asyncio
 async def test_rest_only_device_gets_output_state_sensors():
-    """AP300 (rest_only) gets base sensors + read-only output-state sensors."""
+    """A non-controllable device gets base sensors + output-state sensors."""
     coordinator = _coordinator()
     entry = MagicMock()
     entry.runtime_data = coordinator
-    entry.data = {"devices": ["AP300SN"]}
+    entry.data = {"devices": ["ROSN"]}
 
     added: list = []
     with patch("homeassistant.helpers.frame.report_usage"):

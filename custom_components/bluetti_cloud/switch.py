@@ -55,6 +55,52 @@ SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
 ]
 
 
+# ECO mode switches — only created for devices whose profile declares them.
+ECO_SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
+    BluettiSwitchDescription(
+        key="ac_eco",
+        data_key="ac_eco",
+        name="AC ECO Mode",
+        icon="mdi:leaf",
+        register=0,  # resolved from the device profile at send time
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+    BluettiSwitchDescription(
+        key="dc_eco",
+        data_key="dc_eco",
+        name="DC ECO Mode",
+        icon="mdi:leaf",
+        register=0,
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+]
+
+
+# Grid interaction switches — only for devices whose profile declares them.
+GRID_SWITCH_DESCRIPTIONS: list[BluettiSwitchDescription] = [
+    BluettiSwitchDescription(
+        key="grid_charge",
+        data_key="grid_charge",
+        name="Grid Charging",
+        icon="mdi:transmission-tower-import",
+        register=0,
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+    BluettiSwitchDescription(
+        key="feed_in",
+        data_key="feed_in",
+        name="Grid Feed-in",
+        icon="mdi:transmission-tower-export",
+        register=0,
+        on_value=SWITCH_ON,
+        off_value=SWITCH_OFF,
+    ),
+]
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BluettiConfigEntry,
@@ -71,6 +117,12 @@ async def async_setup_entry(
             continue
         for description in SWITCH_DESCRIPTIONS:
             entities.append(BluettiCloudSwitch(coordinator, sn, description))
+        if coordinator.profile_for(sn).has_eco:
+            for description in ECO_SWITCH_DESCRIPTIONS:
+                entities.append(BluettiCloudSwitch(coordinator, sn, description))
+        if coordinator.profile_for(sn).has_grid_control:
+            for description in GRID_SWITCH_DESCRIPTIONS:
+                entities.append(BluettiCloudSwitch(coordinator, sn, description))
 
     async_add_entities(entities)
 
@@ -96,7 +148,9 @@ class BluettiCloudSwitch(BluettiCloudEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return self.device_data.get(self.entity_description.data_key)
+        """Device-reported state, falling back to the last state we set."""
+        value = self.device_data.get(self.entity_description.data_key)
+        return value if value is not None else self._attr_is_on
 
     async def _send_switch_command(self, value: int) -> None:
         """Send a switch command via the coordinator's MQTT client."""
@@ -116,13 +170,33 @@ class BluettiCloudSwitch(BluettiCloudEntity, SwitchEntity):
             _LOGGER.error("MQTT not connected — cannot send %s command", desc.name)
             raise BluettiMqttError("MQTT not connected")
 
+        # Registers and payload framing are per-model, not global: V1 devices
+        # use 3007/3008 with legacy framing, V2 devices 2011/2012 with the
+        # 01F80F envelope and Modbus slave 0.
+        profile = self.coordinator.profile_for(self._device_sn)
+        register = {
+            "ac_switch": profile.ac_switch_reg,
+            "dc_switch": profile.dc_switch_reg,
+            "ac_eco": profile.ac_eco_reg,
+            "dc_eco": profile.dc_eco_reg,
+            "grid_charge": profile.grid_charge_reg,
+            "feed_in": profile.feed_in_reg,
+        }.get(desc.key)
+        if register is None:
+            _LOGGER.error("%s is not controllable on this device", desc.name)
+            raise BluettiMqttError(f"{desc.name} is not controllable on this device")
+
         try:
-            mqtt.send_command(model, sub_sn, desc.register, value)
+            mqtt.send_command(
+                model, sub_sn, register, value,
+                slave_addr=profile.slave_addr,
+                payload_ver=profile.iot_payload_ver,
+            )
             _LOGGER.info(
                 "Sent %s %s command to %s/%s (reg=%d val=%d)",
                 desc.name,
                 "ON" if value == desc.on_value else "OFF",
-                model, sub_sn, desc.register, value,
+                model, sub_sn, register, value,
             )
         except BluettiMqttError as err:
             _LOGGER.error("MQTT command failed for %s: %s", desc.name, err)

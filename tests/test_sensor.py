@@ -270,3 +270,41 @@ async def test_per_battery_node_soc_sensor():
     assert node_sensors[0]._slave_addr == 51
     assert node_sensors[0].native_value == 95
     assert "B300" in node_sensors[0].name
+
+
+@pytest.mark.asyncio
+async def test_v2_telemetry_sensors_created_for_v2_devices_only():
+    """V2 blocks (temps, grid, PV, load, cells) only apply to V2 devices."""
+    from custom_components.bluetti_cloud.api.profiles import AC300_PROFILE, AP300_PROFILE
+    from custom_components.bluetti_cloud.sensor import (
+        V2_SENSOR_DESCRIPTIONS,
+        async_setup_entry,
+    )
+
+    def _run(profile):
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator._device_info = {}
+        coordinator.get_pack_count.return_value = 0
+        coordinator.get_nodes.return_value = []
+        coordinator.profile_for.return_value = profile
+        entry = MagicMock()
+        entry.runtime_data = coordinator
+        entry.data = {"devices": ["SN"]}
+        return coordinator, entry
+
+    added_v2: list = []
+    coordinator, entry = _run(AP300_PROFILE)
+    with patch("homeassistant.helpers.frame.report_usage"):
+        await async_setup_entry(MagicMock(), entry, added_v2.extend)
+    keys = {e.entity_description.key for e in added_v2}
+    for desc in V2_SENSOR_DESCRIPTIONS:
+        assert desc.key in keys
+
+    added_v1: list = []
+    coordinator, entry = _run(AC300_PROFILE)
+    with patch("homeassistant.helpers.frame.report_usage"):
+        await async_setup_entry(MagicMock(), entry, added_v1.extend)
+    v1_keys = {e.entity_description.key for e in added_v1}
+    assert "grid_frequency" not in v1_keys
+    assert "cell_voltage_delta" not in v1_keys
