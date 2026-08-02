@@ -78,7 +78,11 @@ def is_device_reachable(device_data: dict[str, Any]) -> bool:
     """
     last_seen = device_data.get("last_seen")
     if not last_seen:
-        return False
+        # Never established a contact time. Some devices never provide one —
+        # an AC300's REST telemetry is all-null and its MQTT link may be down —
+        # so treating that as unreachable would hide entities that work. Only
+        # a device we HAVE heard from and then lost is considered unreachable.
+        return True
     return (time.time() - last_seen) < DEVICE_STALE_AFTER
 
 

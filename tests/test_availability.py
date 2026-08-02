@@ -35,10 +35,11 @@ def test_device_not_heard_from_is_unreachable():
     assert is_device_reachable({"last_seen": stale}) is False
 
 
-def test_device_never_seen_is_unreachable():
+def test_never_seen_does_not_hide_entities():
+    """Superseded by test_device_never_seen_stays_available (kept explicit)."""
     from custom_components.bluetti_cloud.coordinator import is_device_reachable
 
-    assert is_device_reachable({}) is False
+    assert is_device_reachable({}) is True
 
 
 def test_boundary_is_inclusive_of_recent_data():
@@ -81,3 +82,40 @@ def test_reachable_sensor_stays_available_to_report_unreachable():
     sensor = BluettiReachableBinarySensor(coord, "SN", REACHABLE_DESCRIPTION)
     assert sensor.available is True
     assert sensor.is_on is False
+
+
+def test_device_never_seen_stays_available():
+    """Absence of a timestamp is not evidence of unreachability.
+
+    A device we have never established contact time for (e.g. an AC300 whose
+    REST telemetry is all-null and whose MQTT link is down) must not have all
+    its entities hidden — that regressed working setups. Only a device that was
+    seen and then went quiet is treated as unreachable.
+    """
+    from custom_components.bluetti_cloud.coordinator import is_device_reachable
+
+    assert is_device_reachable({}) is True
+    assert is_device_reachable({"last_seen": None}) is True
+
+
+def test_device_seen_then_gone_quiet_is_unreachable():
+    from custom_components.bluetti_cloud.coordinator import is_device_reachable
+
+    stale = time.time() - (DEVICE_STALE_AFTER + 60)
+    assert is_device_reachable({"last_seen": stale}) is False
+
+
+def test_reachable_sensor_is_unknown_without_a_contact_time():
+    """Reporting "reachable" for a device we've never heard from would be a
+    claim we cannot support."""
+    from custom_components.bluetti_cloud.binary_sensor import (
+        REACHABLE_DESCRIPTION,
+        BluettiReachableBinarySensor,
+    )
+
+    coord = MagicMock()
+    coord.last_update_success = True
+    coord._device_info = {}
+    coord.data = {"SN": {}}
+    sensor = BluettiReachableBinarySensor(coord, "SN", REACHABLE_DESCRIPTION)
+    assert sensor.is_on is None

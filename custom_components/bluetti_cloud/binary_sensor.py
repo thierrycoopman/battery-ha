@@ -230,7 +230,14 @@ class BluettiReachableBinarySensor(BluettiCloudBinarySensor):
         )
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
+        """True if heard from recently, False if gone quiet, None if unknown.
+
+        Some devices never provide a contact time; reporting them as reachable
+        would be a claim we cannot support, so this stays unknown instead.
+        """
+        if not self.device_data.get("last_seen"):
+            return None
         return is_device_reachable(self.device_data)
 
     @property
