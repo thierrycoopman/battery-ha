@@ -416,10 +416,24 @@ class BluettiCloudCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             try:
                 energy = await self._client.get_energy_detail(sn)
                 if energy:
-                    device_data["energy_day"] = _safe_float(energy.get("day"))
-                    device_data["energy_month"] = _safe_float(energy.get("month"))
-                    device_data["energy_year"] = _safe_float(energy.get("year"))
-                    device_data["energy_total"] = _safe_float(energy.get("total"))
+                    values = {
+                        "energy_day": _safe_float(energy.get("day")),
+                        "energy_month": _safe_float(energy.get("month")),
+                        "energy_year": _safe_float(energy.get("year")),
+                        "energy_total": _safe_float(energy.get("total")),
+                    }
+                    # Some devices return this endpoint entirely zeroed rather
+                    # than reporting no data. A lifetime total of 0 kWh reads as
+                    # "never produced any energy", which is worse than showing
+                    # nothing — so an all-zero response is treated as absent.
+                    # (Real energy for those devices comes from MQTT instead.)
+                    if any(v for v in values.values()):
+                        device_data.update(values)
+                    else:
+                        _LOGGER.debug(
+                            "Energy endpoint returned all zeros for %s — "
+                            "leaving energy totals unknown", sn,
+                        )
             except BluettiCloudApiError:
                 _LOGGER.debug("Failed to get energy detail for %s", sn)
 
