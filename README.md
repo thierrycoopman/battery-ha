@@ -298,6 +298,33 @@ The Device Reachable sensor stays available even when the device does not, so
 it can report the outage. It exposes `last_seen` and `seconds_since_contact`
 attributes for automations.
 
+### Energy figures
+
+Where energy totals come from depends on what a device actually reports:
+
+* **V2 devices (APEX 300)** — the cloud's energy endpoint returns zeros on this
+  hardware, and its lifetime charge and discharge counters report the *same*
+  number as each other, so neither is a usable accumulator. The real figures
+  come over MQTT instead: **Grid Import Energy**, **Grid Export Energy** and
+  **PV Total Energy**. Use those for the Energy Dashboard.
+* **V1 devices (AC300)** — the cloud energy endpoint works, and populates
+  Energy Today / This Month / This Year / Lifetime.
+
+If the endpoint returns all zeros, those four sensors stay *unknown* rather
+than reporting `0 kWh` — a lifetime total of zero would read as "never produced
+any energy", which is worse than showing nothing.
+
+### Values this integration deliberately does not expose
+
+* **State of health.** The APEX 300 reports a battery SOH of 25 while holding
+  91% charge with a 0.002 V spread between its cells — a demonstrably healthy
+  pack. Whatever that number means, presenting it as "25% battery health" would
+  raise a false alarm, so it is not surfaced. **Cell Balance** is the health
+  signal worth watching instead.
+* **Per-battery voltage while idle.** A pack reports its own voltage only under
+  load; at rest the field reads zero. The sensor exists and becomes available
+  when the hardware reports a real value, rather than showing `0 V`.
+
 ## A Note on Device Writes
 
 This integration writes to your device over Bluetti's own protocol. Writes are
@@ -374,7 +401,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (267 tests) and lint
+# Run tests (278 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```
