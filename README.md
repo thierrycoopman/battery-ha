@@ -130,6 +130,42 @@ blocks, which become these sensors:
 > when it has something to report. Fields the device leaves empty are omitted
 > rather than shown as `0` or `-40 °C`.
 
+### Expansions as their own devices
+
+Anything the main unit reports — a battery or a hub — is registered as a
+**separate Home Assistant device**, linked to the main unit. A setup with an
+APEX 300, a B300 and a D1 hub appears as:
+
+```
+AP300 (APEX 300)          SOC, power, PV, grid, load, control, ECO, charging mode
+├── Internal Battery      the main unit's own pack
+├── B300                  attached battery
+└── D1 Hub (HD1)          DC hub
+```
+
+Add a second battery or another hub and it appears automatically as a new
+device — nothing to reconfigure. Batteries are named by their actual model
+(**B300**, **B300K**, **B500K**, …) and hubs by theirs (**D1**, **A1**,
+SolarX); a model that isn't in the catalogue still appears, labelled with its
+raw code rather than being hidden.
+
+Because each expansion is its own device, a dashboard card can point at one and
+get everything for it, and entity names stay short — Home Assistant renders
+`B300 Battery`, not `B300 (node 51) Battery`.
+
+| Entity | On | Notes |
+|--------|----|-------|
+| Battery | batteries | State of charge for that pack specifically |
+| Cell Balance | batteries | Spread between highest and lowest cell — the earliest warning of a failing cell |
+| Temperature | batteries | Warmest cell sensor in the pack |
+| Cells | batteries | Cell count (diagnostic, off by default) |
+| Voltage | batteries | Pack voltage, when the hardware reports it |
+| Connection | all | Whether the expansion is currently reported |
+| Fault | all | Warning or error flag |
+
+> Fields a pack doesn't report — voltage while idle, for instance — are shown
+> as unavailable rather than as `0`.
+
 ### Per-Battery Sensors (dynamic)
 
 Created automatically as batteries are discovered. How they appear depends on the device protocol:
@@ -338,7 +374,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (244 tests) and lint
+# Run tests (267 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```

@@ -119,3 +119,13 @@ def test_slave_zero_is_a_valid_address_not_a_missing_one():
     assert by_addr[0]["has_battery"] is True
     # and it must not have been misfiled onto the expansion
     assert "pack_soc" not in by_addr[51]
+
+
+def test_settings_blocks_are_not_mistaken_for_cell_blocks():
+    """The cell block is matched by size range, which overlaps the settings
+    blocks — exact sizes must win so a 60-byte settings reply is never decoded
+    as cells."""
+    mgr = _manager()
+    assert mgr.identify_block(60) == INV_BASE_SETTINGS   # not cells
+    assert mgr.identify_block(40) != PACK_CELL_INFO      # adv settings
+    assert mgr.identify_block(50) == PACK_CELL_INFO      # genuinely cells
