@@ -85,3 +85,37 @@ def test_cell_reply_lands_on_the_pack_that_sent_it():
     assert node["cell_voltage_delta"] == 0.01
     # and it was NOT decoded as a pack record
     assert "pack_soc" not in node
+
+
+def test_slave_zero_is_a_valid_address_not_a_missing_one():
+    """The main unit answers at slave 0, and 0 is falsy — a truthiness check
+    silently discarded its address and lost the internal battery."""
+    coordinator = MagicMock()
+    coordinator.data = {PARENT: {"device_type": "AP300", "sub_sn": "X"}}
+    coordinator.profile_for.return_value = AP300_PROFILE
+    mgr = BluettiMqttManager(coordinator)
+    mgr.overlays[PARENT] = {"nodes": [
+        {"slave_addr": 0, "model": 6, "model_name": "AP300",
+         "is_battery": False, "online": True},
+        {"slave_addr": 51, "model": 4005, "model_name": "B300",
+         "is_battery": True, "online": True},
+    ]}
+
+    pack = bytearray(208)
+    pack[27] = 93
+    raw = b"AP300" + b"\x00" * 7
+    for i in range(6):
+        pack[2 + i * 2] = raw[i * 2 + 1]
+        pack[3 + i * 2] = raw[i * 2]
+
+    mgr._handle_telemetry_data(PARENT, {
+        "function_code": 0x03,
+        "register_data": bytes(pack),
+        "slave_addr": 0,
+    })
+
+    by_addr = {n["slave_addr"]: n for n in mgr.overlays[PARENT]["nodes"]}
+    assert by_addr[0]["pack_soc"] == 93
+    assert by_addr[0]["has_battery"] is True
+    # and it must not have been misfiled onto the expansion
+    assert "pack_soc" not in by_addr[51]

@@ -619,10 +619,14 @@ class BluettiMqttManager:
 
         if identified is not None:
             register = identified
-            slave_addr = (
-                frame_slave if frame_slave
-                else (pending[1] if pending else 1)
-            )
+            # Slave 0 is the main unit's own address, so test for presence
+            # rather than truthiness — 0 is a valid address, not a missing one.
+            if frame_slave is not None:
+                slave_addr = frame_slave
+            elif pending is not None:
+                slave_addr = pending[1]
+            else:
+                slave_addr = 1
         elif pending is not None:
             register, slave_addr = pending
         else:
