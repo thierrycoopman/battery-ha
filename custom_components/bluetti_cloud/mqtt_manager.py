@@ -780,8 +780,10 @@ class BluettiMqttManager:
         PACK_MAIN_INFO_COUNT * 2: PACK_MAIN_INFO,        # 68
         PACK_ITEM_INFO_COUNT_V2 * 2: PACK_ITEM_INFO,     # 208
     }
-    # The cell block's length varies with cell count, so it is matched by range.
-    _CELL_SIZE_RANGE = (20, 60)
+    # The cell block's length varies with cell count, so it is matched by
+    # range — but the range must not swallow a settings block (40 or 60 bytes),
+    # which would otherwise be decoded as cells if one ever arrives unsolicited.
+    _CELL_SIZE_RANGE = (42, 58)
 
     def identify_block(self, size: int) -> int | None:
         """Which register block a reply of this size represents, if unambiguous."""
