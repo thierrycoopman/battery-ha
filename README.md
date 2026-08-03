@@ -350,6 +350,23 @@ MQTT sensors require an active MQTT connection. Check your HA logs — you shoul
 - Network firewall blocking port 18760 to `iot.bluettipower.com`
 - `pycryptodome` not installed (required for mTLS certificate exchange)
 
+### Expansion entities show as unavailable
+
+Expansions (batteries, hubs) are discovered over MQTT, so they need an MQTT
+connection. If they are unavailable:
+
+1. Check the log for `MQTT telemetry active`. Without MQTT there is no
+   discovery, and every expansion entity stays unavailable.
+2. **Close the Bluetti mobile app.** The broker appears to allow only one
+   session per account, so an open app can hold the connection and keep Home
+   Assistant disconnected. The integration retries with backoff, so it
+   recovers on its own once the session is free.
+3. Give it a poll cycle after MQTT connects — discovery runs each cycle.
+
+Some expansion sensors are unavailable *by design*: a pack reports its voltage
+and temperature only under load, so those stay unavailable at rest rather than
+showing `0`.
+
 ### Per-battery or sub-device sensors not appearing
 These are created dynamically as the integration discovers them.
 - **AC300 (V1):** within 1–2 FC=16 push cycles (~30s after MQTT connects). Look for `"discovered battery pack"` in the logs.
@@ -401,7 +418,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (278 tests) and lint
+# Run tests (282 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```
