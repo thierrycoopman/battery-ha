@@ -17,9 +17,11 @@ import pytest
 from custom_components.bluetti_cloud.api.modbus import (
     INV_GRID_INFO,
     PACK_CELL_INFO,
+    PACK_CELL_INFO_COUNT,
     PACK_ITEM_INFO,
     PACK_ITEM_INFO_COUNT_V2,
 )
+from custom_components.bluetti_cloud.mqtt.transport import Transport
 from tests.replay import ReplaySession, error_response, fc03_response
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "apex300"
@@ -231,3 +233,89 @@ async def test_a_dropped_connection_releases_every_waiting_poll(session):
     manager._cleanup_mqtt_client()
 
     await asyncio.wait_for(asyncio.gather(*polls), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_a_short_reply_answers_the_poll_that_asked_for_it(session):
+    """v0.14.0 regression: every poll ran to its timeout.
+
+    Correlation required the reply to be the size requested. This device
+    answers with the registers it *has* — the captured pack record is 180
+    bytes against a 208-byte request, and the captured cell block 44 against
+    50 — so nothing ever matched. Polls timed out, one after another, and the
+    poll cycle stopped keeping up.
+
+    Asserting against the real captured payloads is the point: a synthetic
+    reply of exactly the requested size hides this completely, which is why
+    the suite stayed green while the integration was broken.
+    """
+    manager = session.manager
+    manager._mqtt_client = MagicMock(is_connected=True)
+
+    poll = asyncio.create_task(
+        manager._poll_register(
+            session.sn, "AP300", "2616113487436",
+            PACK_CELL_INFO, PACK_CELL_INFO_COUNT,
+            slave_addr=BATTERY, payload_ver=1.2,
+        )
+    )
+    await asyncio.sleep(0)
+
+    real = block(PACK_CELL_INFO)
+    assert len(real) != PACK_CELL_INFO_COUNT * 2, "fixture must be a short reply"
+    session.push_fc03(real, slave=BATTERY)
+
+    await asyncio.wait_for(poll, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_a_full_poll_cycle_completes_promptly_against_real_replies(session):
+    """The symptom users saw: cycles that never finished in their interval.
+
+    Five reads at a three-second timeout is fifteen seconds of waiting on a
+    ten-second cycle, so the loop falls permanently behind and readings age.
+    """
+    manager = session.manager
+    manager._mqtt_client = MagicMock(is_connected=True)
+
+    def answer(register, slave, count, payload_ver):
+        # Reply the way the device does: whatever it has, sent back promptly.
+        payload = {
+            PACK_CELL_INFO: block(PACK_CELL_INFO),
+            PACK_ITEM_INFO: bytes(180),
+        }.get(register, bytes(count * 2))
+        loop = asyncio.get_running_loop()
+        loop.call_soon(session.push_fc03, payload, slave)
+
+    manager._transports[session.sn] = Transport(answer)
+
+    await asyncio.wait_for(
+        manager._poll_battery_nodes(session.sn, "AP300", "2616113487436", 1.2),
+        timeout=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_device_failing_does_not_end_polling_for_the_others(session):
+    """A crashed poll loop stops all telemetry until Home Assistant restarts."""
+    manager = session.manager
+    manager._mqtt_client = MagicMock(is_connected=True)
+    manager._mqtt_connected = True
+    manager._coordinator.data = {
+        "BROKEN": {"device_type": "AP300", "sub_sn": "a"},
+        session.sn: {"device_type": "AP300", "sub_sn": "2616113487436"},
+    }
+
+    polled: list[str] = []
+
+    async def cycle(sn, model, sub_sn, profile):
+        if sn == "BROKEN":
+            raise RuntimeError("device fell over")
+        polled.append(sn)
+
+    manager._poll_cycle_for = cycle
+    loop = asyncio.create_task(manager._polling_loop())
+    await asyncio.sleep(0.05)
+    loop.cancel()
+
+    assert session.sn in polled, "the healthy device must still be polled"

@@ -429,7 +429,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (298 tests) and lint
+# Run tests (314 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```

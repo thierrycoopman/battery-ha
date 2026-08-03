@@ -28,28 +28,45 @@ DEFAULT_TIMEOUT = 8.0
 
 @dataclass(frozen=True)
 class Reply:
-    """A decoded Modbus reply: who sent it, and what it contains."""
+    """A decoded Modbus reply: who sent it, and what it contains.
+
+    ``block`` is the register block the frame was recognised as, or None when
+    its size doesn't identify one. An FC=03 reply carries no register address,
+    so recognition by size is the only signal there is.
+    """
 
     slave: int
     length: int
     data: bytes
+    block: int | None = None
 
 
 @dataclass(frozen=True)
 class _Pending:
-    """What an outstanding request expects its reply to look like."""
+    """What an outstanding request expects its reply to look like.
+
+    Matching cannot require a size, because this device answers with the
+    registers it *has* rather than the number asked for: a 16-cell pack returns
+    44 bytes to a 50-byte request, and a pack record 180 bytes to a 208-byte
+    one. Requiring an exact size means no reply ever matches and every poll
+    runs to its timeout.
+
+    So the rule is inverted — a reply from the right address answers the
+    request *unless it is recognisably a different block*. That still rejects
+    the unsolicited telemetry this hardware streams constantly, which is what
+    the correlation exists to guard against, while accepting a genuine answer
+    whose size could not be predicted.
+    """
 
     slave: int
-    # None means the reply's size cannot be predicted — the node registry is
-    # the case: its length depends on how many expansions are attached, so the
-    # sender cannot say in advance. Such a request matches on slave alone.
-    length: int | None
+    register: int
 
     def matches(self, reply: Reply) -> bool:
         # Slave 0 is the main unit's own address, so compare by value.
         if reply.slave != self.slave:
             return False
-        return self.length is None or reply.length == self.length
+        # Recognised as some other block: it's telemetry, not this answer.
+        return reply.block is None or reply.block == self.register
 
 
 # (register, slave, count, payload_ver) -> None
@@ -78,7 +95,7 @@ class Transport:
         self,
         register: int,
         slave: int,
-        count: int | None,
+        count: int,
         payload_ver: float = 1.0,
         # ASYNC109: the timeout belongs to this layer rather than the caller —
         # it bounds how long the *device* may take to answer, and the pending
@@ -91,9 +108,7 @@ class Transport:
             asyncio.TimeoutError: if no matching reply arrives in time.
             ConnectionError: if the connection drops while waiting.
         """
-        expected = _Pending(
-            slave=slave, length=None if count is None else count * 2
-        )
+        expected = _Pending(slave=slave, register=register)
         future: asyncio.Future[Reply] = asyncio.get_running_loop().create_future()
         entry = (expected, future)
         self._waiters.append(entry)

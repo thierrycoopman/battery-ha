@@ -90,15 +90,36 @@ async def test_shutdown_fails_waiters_rather_than_hanging(transport):
 
 
 @pytest.mark.asyncio
-async def test_a_request_of_unpredictable_size_matches_on_address_alone():
-    """The expansion registry's length depends on how many are attached."""
+async def test_a_reply_smaller_than_requested_still_answers_the_request():
+    """The device answers with the registers it has, not the number asked for.
+
+    A 16-cell pack returns 44 bytes to a 50-byte request. Requiring the
+    requested size meant no reply ever matched and every poll ran to its
+    timeout — which is exactly what shipped in v0.14.0.
+    """
     transport = Transport(send=lambda *a: None)
-    pending = asyncio.create_task(transport.request(NODE_INFO, 0, None))
+    pending = asyncio.create_task(transport.request(NODE_INFO, 0, 26))
     await asyncio.sleep(0)
 
-    transport.on_frame(Reply(slave=0, length=52, data=bytes(52)))
+    transport.on_frame(Reply(slave=0, length=44, data=bytes(44)))
     reply = await asyncio.wait_for(pending, timeout=1)
-    assert reply.length == 52
+    assert reply.length == 44
+
+
+@pytest.mark.asyncio
+async def test_a_frame_recognised_as_another_block_is_not_an_answer():
+    """Accepting any size must not mean accepting any frame."""
+    transport = Transport(send=lambda *a: None)
+    pending = asyncio.create_task(transport.request(6100, 51, 104))
+    await asyncio.sleep(0)
+
+    # Streaming telemetry from the same pack, recognisably a different block.
+    transport.on_frame(Reply(slave=51, length=44, data=bytes(44), block=6300))
+    await asyncio.sleep(0)
+    assert not pending.done()
+
+    transport.on_frame(Reply(slave=51, length=180, data=bytes(180)))
+    await asyncio.wait_for(pending, timeout=1)
 
 
 @pytest.mark.asyncio
