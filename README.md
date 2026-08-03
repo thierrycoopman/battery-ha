@@ -359,8 +359,9 @@ connection. If they are unavailable:
    discovery, and every expansion entity stays unavailable.
 2. **Close the Bluetti mobile app.** The broker appears to allow only one
    session per account, so an open app can hold the connection and keep Home
-   Assistant disconnected. The integration retries with backoff, so it
-   recovers on its own once the session is free.
+   Assistant disconnected. The log names this case explicitly — look for
+   `session_conflict` — and the integration waits longer between retries for
+   it, recovering on its own once the session is free.
 3. Give it a poll cycle after MQTT connects — discovery runs each cycle.
 
 Some expansion sensors are unavailable *by design*: a pack reports its voltage
@@ -418,7 +419,7 @@ source venv/bin/activate
 # Install dependencies
 pip install pytest pytest-asyncio aiohttp pycryptodome paho-mqtt homeassistant voluptuous ruff
 
-# Run tests (282 tests) and lint
+# Run tests (298 tests) and lint
 python -m pytest tests/ -v
 ruff check custom_components/ tests/
 ```

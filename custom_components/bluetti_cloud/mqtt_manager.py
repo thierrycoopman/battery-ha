@@ -75,12 +75,11 @@ from .api.mqtt_client import BluettiMqttClient, BluettiMqttError
 from .const import (
     DEFAULT_SCAN_INTERVAL,
     MQTT_POLL_INTERVAL,
-    MQTT_RECONNECT_MAX,
-    MQTT_RECONNECT_MIN,
     MQTT_REQUEST_TIMEOUT,
     MQTT_SCAN_INTERVAL,
     PUSH_ACTIVE_WINDOW,
 )
+from .mqtt.connection import ReconnectPolicy, classify_failure
 
 if TYPE_CHECKING:
     from .coordinator import BluettiCloudCoordinator
@@ -154,7 +153,7 @@ class BluettiMqttManager:
 
         # -- MQTT reconnection state --
         self._reconnect_task: asyncio.Task | None = None
-        self._reconnect_delay: int = MQTT_RECONNECT_MIN
+        self._reconnect_policy = ReconnectPolicy()
         self._stopping: bool = False
 
         # -- Active MQTT polling state --
@@ -277,7 +276,7 @@ class BluettiMqttManager:
         )
 
         self._mqtt_connected = True
-        self._reconnect_delay = MQTT_RECONNECT_MIN  # Reset backoff on success
+        self._reconnect_policy.reset()
 
         # Subscribe to telemetry for MQTT-capable devices only. REST-only
         # devices (e.g. AP300) do not speak this protocol, so skip them.
@@ -351,38 +350,34 @@ class BluettiMqttManager:
         )
 
     async def _reconnect_loop(self) -> None:
-        """Retry MQTT connection with exponential backoff (30s → 60s → 120s → 300s).
+        """Retry the connection, waiting according to why the last try failed.
 
-        Each attempt uses fresh credentials (token, P12 cert, TOTP) since these
-        are time-sensitive. On success, resets the backoff delay. On failure,
-        doubles the delay up to MQTT_RECONNECT_MAX.
+        The two common failures need different patience. A refused session
+        means another client holds the account's single MQTT session — often an
+        open Bluetti mobile app — and asking again sooner just fails again. An
+        unreachable broker is worth retrying more promptly. Both are reported
+        with the reason so the cause is visible in the log.
         """
         try:
             while not self._stopping:
-                _LOGGER.info(
-                    "MQTT reconnect scheduled in %ds", self._reconnect_delay
-                )
-                await asyncio.sleep(self._reconnect_delay)
-
-                if self._stopping:
-                    break
-
                 try:
                     await self.async_start()
                     _LOGGER.info("MQTT reconnected successfully")
-                    return  # Success — exit the loop
-                except Exception:
+                    self._reconnect_policy.reset()
+                    return
+                except Exception as err:
+                    kind = classify_failure(str(err))
+                    delay = self._reconnect_policy.next_delay(kind)
                     _LOGGER.warning(
-                        "MQTT reconnect failed — next attempt in %ds",
-                        min(self._reconnect_delay * 2, MQTT_RECONNECT_MAX),
-                        exc_info=True,
+                        "MQTT connection failed (%s: %s) — retrying in %.0fs",
+                        kind.value, kind.explanation, delay,
                     )
-                    # Clean up the failed attempt
+                    _LOGGER.debug("MQTT failure detail", exc_info=True)
                     self._cleanup_mqtt_client()
-                    # Exponential backoff
-                    self._reconnect_delay = min(
-                        self._reconnect_delay * 2, MQTT_RECONNECT_MAX
-                    )
+
+                if self._stopping:
+                    break
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             _LOGGER.debug("MQTT reconnect loop cancelled")
 

@@ -7,6 +7,8 @@ promptly just displaces whichever client currently holds the session.
 """
 
 
+import pytest
+
 from custom_components.bluetti_cloud.mqtt.connection import (
     RECONNECT_INITIAL,
     RECONNECT_MAX,
@@ -66,3 +68,36 @@ def test_success_resets_the_backoff():
     grown = policy.next_delay(FailureKind.UNREACHABLE)
     policy.reset()
     assert policy.next_delay(FailureKind.UNREACHABLE) < grown
+
+
+@pytest.mark.asyncio
+async def test_reconnect_loop_waits_longer_for_a_contended_session():
+    """The live path must distinguish the two failure kinds, not just retry."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from custom_components.bluetti_cloud.api.mqtt_client import BluettiMqttError
+    from custom_components.bluetti_cloud.api.profiles import AP300_PROFILE
+    from custom_components.bluetti_cloud.mqtt_manager import BluettiMqttManager
+
+    coordinator = MagicMock()
+    coordinator.data = {"SN": {}}
+    coordinator.profile_for.return_value = AP300_PROFILE
+    mgr = BluettiMqttManager(coordinator)
+
+    waits: list[float] = []
+
+    async def _sleep(d):
+        waits.append(d)
+        mgr._stopping = True          # one iteration only
+
+    mgr.async_start = AsyncMock(
+        side_effect=BluettiMqttError("Connection rejected: Normal disconnection")
+    )
+    mgr._cleanup_mqtt_client = MagicMock()
+    with patch("asyncio.sleep", _sleep):
+        await mgr._reconnect_loop()
+
+    assert waits, "a failed attempt must schedule a retry"
+    # A contended session waits longer than the plain initial delay.
+    assert waits[0] > RECONNECT_INITIAL
