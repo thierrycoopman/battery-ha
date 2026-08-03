@@ -394,11 +394,7 @@ class BluettiMqttManager:
     # -- Active MQTT polling --
 
     async def _polling_loop(self) -> None:
-        """Periodically send FC=03 read requests for all devices.
-
-        Sends requests sequentially: homeData, PackMainInfo, then PackItemInfo
-        for each known battery pack. Waits for each response before sending next.
-        """
+        """Read from each device on a fixed interval, one device at a time."""
         _LOGGER.debug("MQTT polling loop started (interval=%ds)", MQTT_POLL_INTERVAL)
         try:
             while True:
@@ -416,34 +412,44 @@ class BluettiMqttManager:
                     if not model or not sub_sn:
                         continue
 
-                    # FC=16 devices (AC300, V1 protocol) push data automatically
-                    # via FC=16 frames — no need to send FC=03 read requests
+                    # V1 devices (AC300) push their telemetry unprompted using
+                    # FC=16 frames, so there is nothing to ask them for.
                     if sn in self._fc16_devices:
                         continue
 
-                    profile = self._coordinator.profile_for(sn)
-                    if profile.iot_payload_ver >= IOT_PAYLOAD_VER_V2:
-                        await self._poll_once(sn, model, sub_sn, profile)
-                    else:
-                        # Legacy V1 poll path (slave 1, 0x01 framing).
-                        await self._poll_register(
-                            sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT
+                    try:
+                        await self._poll_cycle_for(
+                            sn, model, sub_sn, self._coordinator.profile_for(sn)
                         )
-                        await self._poll_register(
-                            sn, model, sub_sn, PACK_MAIN_INFO, PACK_MAIN_INFO_COUNT
-                        )
-                        pack_count = self._pack_counts.get(sn, 0)
-                        for pack_idx in range(1, pack_count + 1):
-                            await self._poll_register(
-                                sn, model, sub_sn, PACK_ITEM_INFO,
-                                PACK_ITEM_INFO_COUNT, slave_addr=pack_idx,
-                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # One device's bad cycle must not end polling for the
+                        # rest. Losing this loop stops telemetry and expansion
+                        # discovery until Home Assistant restarts, which is far
+                        # worse than skipping a cycle.
+                        _LOGGER.exception("Poll cycle failed for %s", sn)
 
                 await asyncio.sleep(MQTT_POLL_INTERVAL)
         except asyncio.CancelledError:
             _LOGGER.debug("MQTT polling loop cancelled")
-        except Exception:
-            _LOGGER.exception("MQTT polling loop crashed")
+
+    async def _poll_cycle_for(self, sn, model, sub_sn, profile) -> None:
+        """One polling cycle for a single device."""
+        if profile.iot_payload_ver >= IOT_PAYLOAD_VER_V2:
+            await self._poll_once(sn, model, sub_sn, profile)
+            return
+
+        # Legacy V1 poll path (slave 1, 0x01 framing).
+        await self._poll_register(sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT)
+        await self._poll_register(
+            sn, model, sub_sn, PACK_MAIN_INFO, PACK_MAIN_INFO_COUNT
+        )
+        for pack_idx in range(1, self._pack_counts.get(sn, 0) + 1):
+            await self._poll_register(
+                sn, model, sub_sn, PACK_ITEM_INFO, PACK_ITEM_INFO_COUNT,
+                slave_addr=pack_idx,
+            )
 
     async def _poll_once(self, sn, model, sub_sn, profile) -> None:
         """One V2 poll cycle for a device.
@@ -510,12 +516,10 @@ class BluettiMqttManager:
         if not self._mqtt_client or not self._mqtt_client.is_connected:
             return
 
-        # The registry's size depends on how many expansions are attached, so
-        # the reply length can't be predicted — count=None matches on address.
         self._pending_request = (NODE_INFO, 0)
         try:
             await self._transport_for(sn, model, sub_sn).request(
-                NODE_INFO, 0, None, payload_ver, timeout=MQTT_REQUEST_TIMEOUT
+                NODE_INFO, 0, 1, payload_ver, timeout=MQTT_REQUEST_TIMEOUT
             )
         except (TimeoutError, ConnectionError, BluettiMqttError) as err:
             _LOGGER.debug("No node info for %s: %s", sn, err)
@@ -650,7 +654,9 @@ class BluettiMqttManager:
                 return
 
         self._route_register_data(sn, register, slave_addr, register_data)
-        self._deliver_reply(sn, parsed.get("slave_addr"), register_data)
+        # `identified` is what the size alone proves; a register inferred from
+        # the pending request proves nothing and must not be used to match.
+        self._deliver_reply(sn, parsed.get("slave_addr"), register_data, identified)
 
     def _handle_write_multiple_data(self, sn: str, parsed: dict) -> None:
         """Process FC=0x10 data push from device.
@@ -678,7 +684,9 @@ class BluettiMqttManager:
         # sub-device list, not telemetry registers — route them separately.
         if start_addr == NODE_INFO:
             self._process_node_info(sn, register_data)
-            self._deliver_reply(sn, parsed.get("slave_addr"), register_data)
+            self._deliver_reply(
+                sn, parsed.get("slave_addr"), register_data, NODE_INFO
+            )
             return
 
         _LOGGER.debug(
@@ -712,21 +720,35 @@ class BluettiMqttManager:
 
         # A push only answers a poll if that poll asked for this block.
         if pending is not None and start_addr == pending[0]:
-            self._deliver_reply(sn, frame_slave, register_data)
+            self._deliver_reply(sn, frame_slave, register_data, start_addr)
 
     def _deliver_reply(
-        self, sn: str, slave_addr: int | None, register_data: bytes
+        self,
+        sn: str,
+        slave_addr: int | None,
+        register_data: bytes,
+        block: int | None = None,
     ) -> None:
         """Offer a frame to whichever request it answers, if any.
 
-        A frame matching nothing is unsolicited telemetry — already routed and
+        ``block`` is the register block the frame was recognised as, where that
+        is known — from the start address of a push, or from the size of a
+        read reply. A request only accepts a frame that is either unrecognised
+        or recognised as the very block it asked for.
+
+        A frame matching nothing is unsolicited telemetry: already routed and
         stored by this point, and deliberately not treated as an answer.
         """
         transport = self._transports.get(sn)
         if transport is None or slave_addr is None:
             return
         transport.on_frame(
-            Reply(slave=slave_addr, length=len(register_data), data=register_data)
+            Reply(
+                slave=slave_addr,
+                length=len(register_data),
+                data=register_data,
+                block=block,
+            )
         )
 
     def _fail_pending(
