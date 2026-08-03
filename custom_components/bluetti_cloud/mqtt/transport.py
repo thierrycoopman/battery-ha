@@ -40,11 +40,16 @@ class _Pending:
     """What an outstanding request expects its reply to look like."""
 
     slave: int
-    length: int
+    # None means the reply's size cannot be predicted — the node registry is
+    # the case: its length depends on how many expansions are attached, so the
+    # sender cannot say in advance. Such a request matches on slave alone.
+    length: int | None
 
     def matches(self, reply: Reply) -> bool:
         # Slave 0 is the main unit's own address, so compare by value.
-        return reply.slave == self.slave and reply.length == self.length
+        if reply.slave != self.slave:
+            return False
+        return self.length is None or reply.length == self.length
 
 
 # (register, slave, count, payload_ver) -> None
@@ -73,7 +78,7 @@ class Transport:
         self,
         register: int,
         slave: int,
-        count: int,
+        count: int | None,
         payload_ver: float = 1.0,
         # ASYNC109: the timeout belongs to this layer rather than the caller —
         # it bounds how long the *device* may take to answer, and the pending
@@ -86,7 +91,9 @@ class Transport:
             asyncio.TimeoutError: if no matching reply arrives in time.
             ConnectionError: if the connection drops while waiting.
         """
-        expected = _Pending(slave=slave, length=count * 2)
+        expected = _Pending(
+            slave=slave, length=None if count is None else count * 2
+        )
         future: asyncio.Future[Reply] = asyncio.get_running_loop().create_future()
         entry = (expected, future)
         self._waiters.append(entry)
@@ -113,6 +120,21 @@ class Transport:
         # its own. Treating it as an answer is what corrupted readings before.
         if self.on_unsolicited is not None:
             self.on_unsolicited(reply)
+
+    def fail(self, slave: int, error: Exception) -> None:
+        """Fail the oldest request to a given address — the device refused it.
+
+        A refusal names no register, so the earliest outstanding request to
+        that address is the one it answers. Failing it beats waiting for the
+        timeout: the poll learns the register is unsupported and moves on.
+        """
+        for entry in list(self._waiters):
+            expected, future = entry
+            if expected.slave != slave or future.done():
+                continue
+            self._waiters.remove(entry)
+            future.set_exception(error)
+            return
 
     def abort(self, reason: str) -> None:
         """Fail every outstanding request — the connection went away."""

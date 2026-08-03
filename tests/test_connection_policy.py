@@ -73,7 +73,6 @@ def test_success_resets_the_backoff():
 @pytest.mark.asyncio
 async def test_reconnect_loop_waits_longer_for_a_contended_session():
     """The live path must distinguish the two failure kinds, not just retry."""
-    import asyncio
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from custom_components.bluetti_cloud.api.mqtt_client import BluettiMqttError

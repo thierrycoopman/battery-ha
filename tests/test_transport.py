@@ -10,6 +10,7 @@ import asyncio
 
 import pytest
 
+from custom_components.bluetti_cloud.api.modbus import NODE_INFO
 from custom_components.bluetti_cloud.mqtt.transport import Reply, Transport
 
 
@@ -86,3 +87,31 @@ async def test_shutdown_fails_waiters_rather_than_hanging(transport):
     transport.abort("connection lost")
     with pytest.raises(ConnectionError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_a_request_of_unpredictable_size_matches_on_address_alone():
+    """The expansion registry's length depends on how many are attached."""
+    transport = Transport(send=lambda *a: None)
+    pending = asyncio.create_task(transport.request(NODE_INFO, 0, None))
+    await asyncio.sleep(0)
+
+    transport.on_frame(Reply(slave=0, length=52, data=bytes(52)))
+    reply = await asyncio.wait_for(pending, timeout=1)
+    assert reply.length == 52
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_fails_only_the_request_it_answers():
+    """A refusal names no register, so it belongs to that address's oldest read."""
+    transport = Transport(send=lambda *a: None)
+    refused = asyncio.create_task(transport.request(6100, 51, 104))
+    other = asyncio.create_task(transport.request(6300, 0, 25))
+    await asyncio.sleep(0)
+
+    transport.fail(51, RuntimeError("illegal data address"))
+
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(refused, timeout=1)
+    assert not other.done(), "an unrelated address must keep waiting"
+    other.cancel()

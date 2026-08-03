@@ -69,7 +69,7 @@ This integration talks to the same private cloud API and MQTT broker as the Blue
 - **Device settings** — ECO idle-shutoff, charging mode, grid charging and feed-in, with power and SOC limits. Every value is bounded by what the device itself accepts
 - **Power monitoring** — PV input, grid input, AC output, DC output, grid feed-in (W)
 - **Energy tracking** — Daily, monthly, yearly, and lifetime totals (kWh) for the HA Energy Dashboard
-- **Automatic MQTT reconnection** — Exponential backoff (30s → 60s → 120s → 5min) with fresh credentials each attempt
+- **Automatic MQTT reconnection** — Backoff from 45s to 10 minutes, with fresh credentials each attempt. The retry wait depends on *why* the last attempt failed: a session held by another client is given longer than an unreachable broker, and the log says which it was
 - **Graceful degradation** — If MQTT is unavailable, falls back to REST-only polling and keeps retrying in the background
 - **Reconfigure support** — Add or remove devices on an existing entry without losing history
 
@@ -346,9 +346,19 @@ here does not throw an exception; it changes real hardware.
 ## Troubleshooting
 
 ### MQTT sensors show "Unknown"
-MQTT sensors require an active MQTT connection. Check your HA logs — you should see `"MQTT telemetry active"` shortly after startup. If MQTT fails, the integration will retry automatically with exponential backoff (check for `"MQTT reconnect scheduled"` messages). Common blockers:
-- Network firewall blocking port 18760 to `iot.bluettipower.com`
-- `pycryptodome` not installed (required for mTLS certificate exchange)
+MQTT sensors require an active MQTT connection. Check your HA logs — you should
+see `"MQTT telemetry active"` shortly after startup.
+
+If it fails, the retry log names the cause, which tells you what to do:
+
+| Log says | What it means | What to do |
+|---|---|---|
+| `session_conflict` | Another client holds the account's MQTT session | Close the Bluetti mobile app. It recovers on its own once the session frees up |
+| `unreachable` | The broker could not be reached | Check that port 18760 to `iot.bluettipower.com` is open |
+| `auth` | Certificate or token exchange failed | Confirm `pycryptodome` is installed (required for mTLS) and that your credentials still work in the app |
+
+The integration keeps retrying regardless, waiting longer after each failure
+(45 seconds up to 10 minutes) and longer again when the session is contended.
 
 ### Expansion entities show as unavailable
 
@@ -430,7 +440,10 @@ ruff check custom_components/ tests/
 |---|---|
 | `custom_components/bluetti_cloud/api/` | Cloud REST client, MQTT client, crypto/TOTP, Modbus framing + parsers, device profiles |
 | `custom_components/bluetti_cloud/coordinator.py` | REST polling and orchestration |
-| `custom_components/bluetti_cloud/mqtt_manager.py` | MQTT lifecycle, reconnection, polling, telemetry parsing |
+| `custom_components/bluetti_cloud/mqtt_manager.py` | MQTT lifecycle, polling, telemetry parsing |
+| `custom_components/bluetti_cloud/mqtt/transport.py` | Matches each reply to the request that asked for it |
+| `custom_components/bluetti_cloud/mqtt/connection.py` | Failure classification and reconnect backoff |
+| `tests/replay.py` | Replays captured wire traffic through the real message path |
 | `custom_components/bluetti_cloud/{sensor,binary_sensor,switch}.py` | Entity platforms |
 | `scripts/discovery/` | Read-only probe scripts used to investigate a device against a live account (see its README) |
 | `tests/fixtures/` | Real captured device payloads used as test fixtures |
