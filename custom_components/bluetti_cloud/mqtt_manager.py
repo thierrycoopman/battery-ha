@@ -418,48 +418,7 @@ class BluettiMqttManager:
 
                     profile = self._coordinator.profile_for(sn)
                     if profile.iot_payload_ver >= IOT_PAYLOAD_VER_V2:
-                        # The device streams telemetry on its own; polling on
-                        # top of that is redundant traffic. Still poll while it
-                        # is quiet, so data never goes stale if the stream stops.
-                        if self.is_streaming(sn):
-                            _LOGGER.debug(
-                                "Skipping poll for %s — device is streaming", sn
-                            )
-                            continue
-                        # 2nd-gen IoT poll device (AP300): homeData (reg 100)
-                        # provides aggregate SOC/voltage/charging/switch state.
-                        # Per-pack blocks (PackMainInfo/PackItemInfo) are a
-                        # follow-up (#5). Uses slave 0 + the V2 payload envelope.
-                        await self._poll_register(
-                            sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT,
-                            slave_addr=profile.slave_addr,
-                            payload_ver=profile.iot_payload_ver,
-                        )
-                        # Authoritative AC/DC switch state (the V2 homeData
-                        # ctrl bits do not track it reliably).
-                        await self._poll_register(
-                            sn, model, sub_sn, INV_BASE_SETTINGS,
-                            INV_BASE_SETTINGS_COUNT,
-                            slave_addr=profile.slave_addr,
-                            payload_ver=profile.iot_payload_ver,
-                        )
-                        # Grid charging / feed-in state.
-                        await self._poll_register(
-                            sn, model, sub_sn, INV_ADV_SETTINGS,
-                            INV_ADV_SETTINGS_COUNT,
-                            slave_addr=profile.slave_addr,
-                            payload_ver=profile.iot_payload_ver,
-                        )
-                        # Enumerate sub-devices (batteries, D1/A1 hubs) via the
-                        # NODE_INFO query-write.
-                        await self._poll_node_info(
-                            sn, model, sub_sn, profile.iot_payload_ver
-                        )
-                        # Then read each battery node's own record at its slave
-                        # address (per-battery model, SOC, cell count).
-                        await self._poll_battery_nodes(
-                            sn, model, sub_sn, profile.iot_payload_ver
-                        )
+                        await self._poll_once(sn, model, sub_sn, profile)
                     else:
                         # Legacy V1 poll path (slave 1, 0x01 framing).
                         await self._poll_register(
@@ -480,6 +439,45 @@ class BluettiMqttManager:
             _LOGGER.debug("MQTT polling loop cancelled")
         except Exception:
             _LOGGER.exception("MQTT polling loop crashed")
+
+    async def _poll_once(self, sn, model, sub_sn, profile) -> None:
+        """One V2 poll cycle for a device.
+
+        A streaming device sends its telemetry blocks unprompted, so polling
+        those again is pure duplication. Sub-device discovery and per-pack
+        reads are different: the device answers them when asked but does not
+        volunteer them per pack, so they run on every cycle regardless.
+        """
+        if not self.is_streaming(sn):
+            # Aggregate SOC / voltage / charging state.
+            await self._poll_register(
+                sn, model, sub_sn, HOME_DATA, HOME_DATA_COUNT,
+                slave_addr=profile.slave_addr,
+                payload_ver=profile.iot_payload_ver,
+            )
+            # Authoritative AC/DC switch state (the V2 homeData ctrl bits do
+            # not track it reliably).
+            await self._poll_register(
+                sn, model, sub_sn, INV_BASE_SETTINGS, INV_BASE_SETTINGS_COUNT,
+                slave_addr=profile.slave_addr,
+                payload_ver=profile.iot_payload_ver,
+            )
+            # Grid charging / feed-in state.
+            await self._poll_register(
+                sn, model, sub_sn, INV_ADV_SETTINGS, INV_ADV_SETTINGS_COUNT,
+                slave_addr=profile.slave_addr,
+                payload_ver=profile.iot_payload_ver,
+            )
+        else:
+            _LOGGER.debug(
+                "%s is streaming — skipping the telemetry reads it already "
+                "sends, but still discovering expansions", sn,
+            )
+
+        # Always: enumerate expansions and read each pack. These are requests;
+        # the device does not push them per pack.
+        await self._poll_node_info(sn, model, sub_sn, profile.iot_payload_ver)
+        await self._poll_battery_nodes(sn, model, sub_sn, profile.iot_payload_ver)
 
     async def _poll_node_info(
         self, sn: str, model: str, sub_sn: str, payload_ver: float
@@ -687,10 +685,17 @@ class BluettiMqttManager:
             sn, start_addr, len(register_data),
         )
 
-        slave_addr = 1
+        # A push carries the sending device's slave address in the frame.
+        # Falling back to the last request would file one pack's data against
+        # another. Slave 0 is the main unit, so test for presence not truth.
         pending = self._pending_request
-        if pending is not None:
+        frame_slave = parsed.get("slave_addr")
+        if frame_slave is not None:
+            slave_addr = frame_slave
+        elif pending is not None:
             slave_addr = pending[1]
+        else:
+            slave_addr = 1
 
         # V2 devices stream telemetry as FC=16 pushes using V2 register
         # addresses. They must NOT go through the V1 (AC300) register map:
