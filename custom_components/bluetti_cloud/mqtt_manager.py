@@ -75,12 +75,12 @@ from .api.mqtt_client import BluettiMqttClient, BluettiMqttError
 from .const import (
     DEFAULT_SCAN_INTERVAL,
     MQTT_POLL_INTERVAL,
-    MQTT_RECONNECT_MAX,
-    MQTT_RECONNECT_MIN,
     MQTT_REQUEST_TIMEOUT,
     MQTT_SCAN_INTERVAL,
     PUSH_ACTIVE_WINDOW,
 )
+from .mqtt.connection import ReconnectPolicy, classify_failure
+from .mqtt.transport import Reply, Transport
 
 if TYPE_CHECKING:
     from .coordinator import BluettiCloudCoordinator
@@ -154,15 +154,19 @@ class BluettiMqttManager:
 
         # -- MQTT reconnection state --
         self._reconnect_task: asyncio.Task | None = None
-        self._reconnect_delay: int = MQTT_RECONNECT_MIN
+        self._reconnect_policy = ReconnectPolicy()
         self._stopping: bool = False
 
         # -- Active MQTT polling state --
         self._poll_task: asyncio.Task | None = None
         # Pending request tracking for response routing
+        # Routing hint for replies whose length alone cannot identify them.
         self._pending_request: tuple[int, int] | None = None  # (register, slave_addr)
-        self._response_event: asyncio.Event = asyncio.Event()
-        self._response_data: bytes | None = None
+        # One transport per device, so a reply is matched to the request that
+        # actually asked for it. A shared event was satisfied by any incoming
+        # frame, which on a device that streams telemetry meant every poll
+        # "completed" instantly whether or not its answer had arrived.
+        self._transports: dict[str, Transport] = {}
         # Discovered pack counts per device (for dynamic sensor creation)
         # This tracks actually connected packs (not hardware slots)
         self._pack_counts: dict[str, int] = {}
@@ -277,7 +281,7 @@ class BluettiMqttManager:
         )
 
         self._mqtt_connected = True
-        self._reconnect_delay = MQTT_RECONNECT_MIN  # Reset backoff on success
+        self._reconnect_policy.reset()
 
         # Subscribe to telemetry for MQTT-capable devices only. REST-only
         # devices (e.g. AP300) do not speak this protocol, so skip them.
@@ -317,6 +321,11 @@ class BluettiMqttManager:
             self._mqtt_client.cleanup_pem_files()
             self._mqtt_client = None
         self._mqtt_connected = False
+        # Anything still waiting for a reply will never get one. Failing them
+        # now frees the poll loop immediately instead of leaving it blocked for
+        # a full timeout per outstanding read while the link is already gone.
+        for transport in self._transports.values():
+            transport.abort("MQTT disconnected")
 
     def _start_polling(self) -> None:
         """Start the active MQTT polling task."""
@@ -351,38 +360,34 @@ class BluettiMqttManager:
         )
 
     async def _reconnect_loop(self) -> None:
-        """Retry MQTT connection with exponential backoff (30s → 60s → 120s → 300s).
+        """Retry the connection, waiting according to why the last try failed.
 
-        Each attempt uses fresh credentials (token, P12 cert, TOTP) since these
-        are time-sensitive. On success, resets the backoff delay. On failure,
-        doubles the delay up to MQTT_RECONNECT_MAX.
+        The two common failures need different patience. A refused session
+        means another client holds the account's single MQTT session — often an
+        open Bluetti mobile app — and asking again sooner just fails again. An
+        unreachable broker is worth retrying more promptly. Both are reported
+        with the reason so the cause is visible in the log.
         """
         try:
             while not self._stopping:
-                _LOGGER.info(
-                    "MQTT reconnect scheduled in %ds", self._reconnect_delay
-                )
-                await asyncio.sleep(self._reconnect_delay)
-
-                if self._stopping:
-                    break
-
                 try:
                     await self.async_start()
                     _LOGGER.info("MQTT reconnected successfully")
-                    return  # Success — exit the loop
-                except Exception:
+                    self._reconnect_policy.reset()
+                    return
+                except Exception as err:
+                    kind = classify_failure(str(err))
+                    delay = self._reconnect_policy.next_delay(kind)
                     _LOGGER.warning(
-                        "MQTT reconnect failed — next attempt in %ds",
-                        min(self._reconnect_delay * 2, MQTT_RECONNECT_MAX),
-                        exc_info=True,
+                        "MQTT connection failed (%s: %s) — retrying in %.0fs",
+                        kind.value, kind.explanation, delay,
                     )
-                    # Clean up the failed attempt
+                    _LOGGER.debug("MQTT failure detail", exc_info=True)
                     self._cleanup_mqtt_client()
-                    # Exponential backoff
-                    self._reconnect_delay = min(
-                        self._reconnect_delay * 2, MQTT_RECONNECT_MAX
-                    )
+
+                if self._stopping:
+                    break
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             _LOGGER.debug("MQTT reconnect loop cancelled")
 
@@ -479,28 +484,41 @@ class BluettiMqttManager:
         await self._poll_node_info(sn, model, sub_sn, profile.iot_payload_ver)
         await self._poll_battery_nodes(sn, model, sub_sn, profile.iot_payload_ver)
 
+    def _transport_for(self, sn: str, model: str, sub_sn: str) -> Transport:
+        """The reply-matching transport for one device, created on first use."""
+        transport = self._transports.get(sn)
+        if transport is None:
+            def send(register: int, slave: int, count: int, payload_ver: float) -> None:
+                client = self._mqtt_client
+                if client is None:
+                    raise BluettiMqttError("MQTT not connected")
+                if register == NODE_INFO:
+                    client.send_node_query(model, sub_sn, 1, payload_ver)
+                else:
+                    client.send_read_request(
+                        model, sub_sn, register, count, slave, payload_ver
+                    )
+
+            transport = Transport(send)
+            self._transports[sn] = transport
+        return transport
+
     async def _poll_node_info(
         self, sn: str, model: str, sub_sn: str, payload_ver: float
     ) -> None:
-        """Send a NODE_INFO query-write and wait for the sub-device list reply."""
+        """Ask for the expansion registry and wait for that specific reply."""
         if not self._mqtt_client or not self._mqtt_client.is_connected:
             return
 
+        # The registry's size depends on how many expansions are attached, so
+        # the reply length can't be predicted — count=None matches on address.
         self._pending_request = (NODE_INFO, 0)
-        self._response_event.clear()
         try:
-            self._mqtt_client.send_node_query(model, sub_sn, 1, payload_ver)
-        except BluettiMqttError:
-            _LOGGER.debug("Failed to send node query for %s", sn)
-            self._pending_request = None
-            return
-
-        try:
-            await asyncio.wait_for(
-                self._response_event.wait(), timeout=MQTT_REQUEST_TIMEOUT
+            await self._transport_for(sn, model, sub_sn).request(
+                NODE_INFO, 0, None, payload_ver, timeout=MQTT_REQUEST_TIMEOUT
             )
-        except TimeoutError:
-            _LOGGER.debug("Timeout waiting for node info: %s", sn)
+        except (TimeoutError, ConnectionError, BluettiMqttError) as err:
+            _LOGGER.debug("No node info for %s: %s", sn, err)
         finally:
             self._pending_request = None
 
@@ -540,41 +558,29 @@ class BluettiMqttManager:
         slave_addr: int = 1,
         payload_ver: float = 1.0,
     ) -> None:
-        """Send a single FC=03 read request and wait for response."""
+        """Read one register block, waiting for the reply that answers it."""
         if not self._mqtt_client or not self._mqtt_client.is_connected:
             return
 
-        # Skip registers that previously returned Modbus errors
-        unsupported = self._unsupported_registers.get(sn, set())
-        if (register, slave_addr) in unsupported:
+        # Registers this device has already refused aren't worth asking again.
+        if (register, slave_addr) in self._unsupported_registers.get(sn, set()):
             return
 
-        # Set up pending request tracking
         self._pending_request = (register, slave_addr)
-        self._response_event.clear()
-        self._response_data = None
-
         try:
-            self._mqtt_client.send_read_request(
-                model, sub_sn, register, count, slave_addr, payload_ver
-            )
-        except BluettiMqttError:
-            _LOGGER.debug(
-                "Failed to send read request for %s reg=%d slave=%d",
-                sn, register, slave_addr,
-            )
-            self._pending_request = None
-            return
-
-        # Wait for response
-        try:
-            await asyncio.wait_for(
-                self._response_event.wait(), timeout=MQTT_REQUEST_TIMEOUT
+            await self._transport_for(sn, model, sub_sn).request(
+                register, slave_addr, count, payload_ver,
+                timeout=MQTT_REQUEST_TIMEOUT,
             )
         except TimeoutError:
             _LOGGER.debug(
-                "Timeout waiting for response: %s reg=%d slave=%d",
-                sn, register, slave_addr,
+                "No reply to read of %s reg=%d slave=%d within %ss",
+                sn, register, slave_addr, MQTT_REQUEST_TIMEOUT,
+            )
+        except (ConnectionError, BluettiMqttError) as err:
+            _LOGGER.debug(
+                "Read of %s reg=%d slave=%d failed: %s",
+                sn, register, slave_addr, err,
             )
         finally:
             self._pending_request = None
@@ -644,10 +650,7 @@ class BluettiMqttManager:
                 return
 
         self._route_register_data(sn, register, slave_addr, register_data)
-
-        # Signal the polling loop that a response arrived
-        self._response_data = register_data
-        self._response_event.set()
+        self._deliver_reply(sn, parsed.get("slave_addr"), register_data)
 
     def _handle_write_multiple_data(self, sn: str, parsed: dict) -> None:
         """Process FC=0x10 data push from device.
@@ -675,9 +678,7 @@ class BluettiMqttManager:
         # sub-device list, not telemetry registers — route them separately.
         if start_addr == NODE_INFO:
             self._process_node_info(sn, register_data)
-            pending = self._pending_request
-            if pending is not None and pending[0] == NODE_INFO:
-                self._response_event.set()
+            self._deliver_reply(sn, parsed.get("slave_addr"), register_data)
             return
 
         _LOGGER.debug(
@@ -709,10 +710,39 @@ class BluettiMqttManager:
             self._process_fc16_data(sn, start_addr, register_data)
             self._route_register_data(sn, start_addr, slave_addr, register_data)
 
-        # Only signal response event if this matches the pending request
+        # A push only answers a poll if that poll asked for this block.
         if pending is not None and start_addr == pending[0]:
-            self._response_data = register_data
-            self._response_event.set()
+            self._deliver_reply(sn, frame_slave, register_data)
+
+    def _deliver_reply(
+        self, sn: str, slave_addr: int | None, register_data: bytes
+    ) -> None:
+        """Offer a frame to whichever request it answers, if any.
+
+        A frame matching nothing is unsolicited telemetry — already routed and
+        stored by this point, and deliberately not treated as an answer.
+        """
+        transport = self._transports.get(sn)
+        if transport is None or slave_addr is None:
+            return
+        transport.on_frame(
+            Reply(slave=slave_addr, length=len(register_data), data=register_data)
+        )
+
+    def _fail_pending(
+        self, sn: str, pending: tuple[int, int], exception_code: int
+    ) -> None:
+        """Let the poll waiting on a refused register stop waiting."""
+        transport = self._transports.get(sn)
+        if transport is None:
+            return
+        transport.fail(
+            pending[1],
+            BluettiMqttError(
+                f"device refused register {pending[0]} "
+                f"(exception 0x{exception_code:02X})"
+            ),
+        )
 
     def _handle_error_response(self, sn: str, parsed: dict) -> None:
         """Process Modbus error response (FC with bit 7 set, e.g. 0x83).
@@ -742,8 +772,10 @@ class BluettiMqttManager:
                 sn, original_fc, exception_code,
             )
 
-        # Signal the polling loop so it doesn't waste time on timeout
-        self._response_event.set()
+        # Release the waiting poll rather than letting it time out. A refusal
+        # is an answer: the register isn't there, and the next read can start.
+        if pending is not None:
+            self._fail_pending(sn, pending, exception_code)
 
     def _process_node_info(self, sn: str, register_data: bytes) -> None:
         """Parse a NODE_INFO reply and store the sub-device list in the overlay."""
